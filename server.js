@@ -401,96 +401,186 @@ app.post('/api/debug/test-usuario', async (req, res) => {
 // VERSIÓN SIMPLIFICADA DEL POST USUARIOS
 // =============================================
 
-// Reemplazar el POST /api/usuarios actual con esta versión simplificada
 app.post('/api/usuarios', async (req, res) => {
     let connection;
     try {
-        console.log('\n📝 CREANDO USUARIO...');
-        console.log('📋 Body:', JSON.stringify(req.body, null, 2));
+        console.log('\n🔥 VERSIÓN SIMPLIFICADA - CREANDO USUARIO...');
+        console.log('📋 Datos recibidos:', req.body);
         
+        // Obtener conexión
         connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida');
         
-        const { nombre, apellido, clave, rol = 'API' } = req.body;
+        // Extraer datos básicos
+        const { nombre, apellido, clave, rol } = req.body;
+        console.log('📝 Datos extraídos:', { nombre, apellido, clave: clave ? '[PRESENTE]' : '[FALTANTE]', rol });
         
-        // Validaciones básicas
-        if (!nombre || !apellido || !clave) {
-            console.log('❌ Validación fallida');
+        // Validación mínima
+        if (!nombre || !apellido || !clave || !rol) {
+            console.log('❌ Faltan datos obligatorios');
             return res.status(400).json({ 
-                error: 'Nombre, apellido y clave son obligatorios' 
+                error: 'Todos los campos son obligatorios: nombre, apellido, clave, rol' 
             });
         }
         
-        // Verificar rol
-        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
-        if (rolExists.length === 0) {
-            console.log('❌ Rol no válido:', rol);
-            return res.status(400).json({ 
-                error: `Rol '${rol}' no existe. Roles válidos: ADM, API` 
-            });
-        }
-        
-        // Generar ID
-        const userId = `USR_${Date.now().toString().slice(-8)}_${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+        // Generar ID simple
+        const userId = `USR_${Date.now()}`;
         console.log('🆔 ID generado:', userId);
         
-        // Verificar usuario existente
-        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombre.trim()]);
-        if (userExists.length > 0) {
-            console.log('❌ Usuario ya existe');
-            return res.status(400).json({ 
-                error: 'Ya existe un usuario con ese nombre' 
-            });
-        }
+        // Ejecutar INSERT exactamente igual al que funciona manualmente
+        console.log('💾 Ejecutando INSERT...');
+        const insertQuery = 'INSERT INTO usuario (id, nombre, apellido, clave, rol) VALUES (?, ?, ?, ?, ?)';
+        const insertParams = [userId, nombre, apellido, clave, rol];
         
-        // Insertar usuario
-        console.log('💾 Insertando usuario...');
-        await connection.execute(`
-            INSERT INTO usuario (id, nombre, apellido, clave, rol, activo) 
-            VALUES (?, ?, ?, ?, ?, 1)
-        `, [userId, nombre.trim(), apellido.trim(), clave.trim(), rol]);
+        console.log('📝 Query:', insertQuery);
+        console.log('📝 Params:', insertParams);
         
-        console.log('✅ Usuario creado exitosamente:', userId);
+        const [result] = await connection.execute(insertQuery, insertParams);
         
-        // Obtener usuario creado
-        const [newUser] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.rol, u.activo,
-                   r.descripcion as rol_nombre
-            FROM usuario u
-            LEFT JOIN rol r ON u.rol = r.rol
-            WHERE u.id = ?
-        `, [userId]);
+        console.log('✅ INSERT ejecutado exitosamente');
+        console.log('📊 Resultado:', result);
         
+        // Respuesta simple
         res.status(201).json({ 
-            id: userId,
+            success: true,
             message: 'Usuario creado exitosamente',
+            id: userId,
             usuario: {
-                id: newUser[0].id,
-                nombre: newUser[0].nombre,
-                apellido: newUser[0].apellido,
-                rol: newUser[0].rol,
-                rol_nombre: newUser[0].rol_nombre || 'Usuario',
-                activo: newUser[0].activo
+                id: userId,
+                nombre: nombre,
+                apellido: apellido,
+                rol: rol
             }
         });
         
     } catch (error) {
-        console.error('💥 ERROR CREANDO USUARIO:', error);
-        console.error('📋 Error completo:', {
+        console.error('💥 ERROR COMPLETO:', error);
+        console.error('📋 Detalles del error:', {
             message: error.message,
             code: error.code,
             errno: error.errno,
             sql: error.sql,
             sqlState: error.sqlState,
-            sqlMessage: error.sqlMessage
+            sqlMessage: error.sqlMessage,
+            stack: error.stack
         });
         
         res.status(500).json({ 
             error: 'Error creando usuario',
             details: error.message,
+            code: error.code,
+            errno: error.errno
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+            console.log('🔓 Conexión liberada');
+        }
+    }
+});
+
+// =============================================
+// ENDPOINT DE PRUEBA DIRECTO
+// =============================================
+
+// Agrega también este endpoint para probar directamente:
+app.post('/api/test-direct-insert', async (req, res) => {
+    let connection;
+    try {
+        console.log('\n🧪 TEST DIRECTO - Insertando usuario hardcodeado...');
+        
+        connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida');
+        
+        // Datos hardcodeados que sabemos que funcionan
+        const testId = `TEST_${Date.now()}`;
+        const insertQuery = 'INSERT INTO usuario (id, nombre, apellido, clave, rol) VALUES (?, ?, ?, ?, ?)';
+        const insertParams = [testId, 'PEDRO', 'VERA', 'admin', 'ADM'];
+        
+        console.log('📝 Ejecutando:', insertQuery);
+        console.log('📝 Con parámetros:', insertParams);
+        
+        const [result] = await connection.execute(insertQuery, insertParams);
+        
+        console.log('✅ INSERT directo exitoso');
+        console.log('📊 Resultado:', result);
+        
+        res.json({
+            success: true,
+            message: 'Usuario de prueba creado exitosamente',
+            id: testId,
+            insertResult: result
+        });
+        
+    } catch (error) {
+        console.error('💥 ERROR en test directo:', error);
+        res.status(500).json({
+            error: 'Error en test directo',
+            details: error.message,
             code: error.code
         });
     } finally {
         if (connection) connection.release();
+    }
+});
+
+// =============================================
+// ENDPOINT PARA VER LOGS EN TIEMPO REAL
+// =============================================
+
+app.get('/api/debug/test-connection-detailed', async (req, res) => {
+    let connection;
+    try {
+        console.log('\n🔍 PRUEBA DETALLADA DE CONEXIÓN...');
+        
+        // Paso 1: Obtener conexión
+        console.log('1️⃣ Obteniendo conexión...');
+        connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida exitosamente');
+        
+        // Paso 2: Probar query simple
+        console.log('2️⃣ Probando query simple...');
+        const [simpleTest] = await connection.execute('SELECT 1 as test');
+        console.log('✅ Query simple exitosa:', simpleTest[0]);
+        
+        // Paso 3: Probar acceso a tabla usuario
+        console.log('3️⃣ Probando acceso a tabla usuario...');
+        const [userTableTest] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
+        console.log('✅ Acceso a tabla usuario exitoso, total:', userTableTest[0].count);
+        
+        // Paso 4: Probar DESCRIBE usuario
+        console.log('4️⃣ Verificando estructura de tabla usuario...');
+        const [userStructure] = await connection.execute('DESCRIBE usuario');
+        console.log('✅ Estructura de tabla usuario:', userStructure);
+        
+        // Paso 5: Probar SELECT en tabla rol
+        console.log('5️⃣ Verificando tabla rol...');
+        const [roleTest] = await connection.execute('SELECT rol, descripcion FROM rol');
+        console.log('✅ Roles disponibles:', roleTest);
+        
+        res.json({
+            success: true,
+            tests: {
+                connection: true,
+                simpleQuery: simpleTest[0],
+                userTableAccess: userTableTest[0].count,
+                userTableStructure: userStructure,
+                availableRoles: roleTest
+            }
+        });
+        
+    } catch (error) {
+        console.error('💥 Error en prueba detallada:', error);
+        res.status(500).json({
+            error: 'Error en prueba detallada',
+            details: error.message,
+            step: 'Ver logs del servidor para detalles'
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+            console.log('🔓 Conexión liberada');
+        }
     }
 });
 

@@ -302,77 +302,156 @@ app.get('/api/usuarios', async (req, res) => {
     }
 });
 
+// =============================================
+// ENDPOINT DE DEBUG PARA DIAGNÓSTICO DE USUARIOS
+// =============================================
+
+// Agregar este endpoint ANTES del POST /api/usuarios en tu server.js
+app.post('/api/debug/test-usuario', async (req, res) => {
+    let connection;
+    try {
+        console.log('\n🔧 DEBUG: Probando creación de usuario paso a paso...');
+        console.log('📋 Body recibido:', JSON.stringify(req.body, null, 2));
+        
+        connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida');
+        
+        // Paso 1: Verificar datos de entrada
+        const { nombre, apellido, clave, rol = 'API' } = req.body;
+        console.log('📝 Datos extraídos:', { nombre, apellido, clave: clave ? '[PRESENTE]' : '[AUSENTE]', rol });
+        
+        // Paso 2: Verificar roles disponibles
+        const [rolesDisponibles] = await connection.execute('SELECT rol, descripcion FROM rol');
+        console.log('👥 Roles disponibles:', rolesDisponibles);
+        
+        // Paso 3: Verificar si el rol existe
+        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
+        console.log(`🔍 Verificando rol '${rol}':`, rolExists.length > 0 ? 'EXISTE' : 'NO EXISTE');
+        
+        // Paso 4: Generar ID único
+        const userId = `USR_${Date.now().toString().slice(-8)}_${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+        console.log('🆔 ID generado:', userId);
+        
+        // Paso 5: Verificar usuarios existentes con el mismo nombre
+        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombre]);
+        console.log(`👤 Usuario '${nombre}' ya existe:`, userExists.length > 0 ? 'SÍ' : 'NO');
+        
+        // Paso 6: Verificar estructura de tabla usuario
+        const [tableStructure] = await connection.execute('DESCRIBE usuario');
+        console.log('🏗️ Estructura tabla usuario:', tableStructure.map(col => ({ field: col.Field, type: col.Type, null: col.Null })));
+        
+        // Paso 7: Intentar inserción de prueba (sin confirmar)
+        const insertQuery = `
+            INSERT INTO usuario (id, nombre, apellido, clave, rol, activo) 
+            VALUES (?, ?, ?, ?, ?, 1)
+        `;
+        const insertParams = [userId, nombre || 'TestNombre', apellido || 'TestApellido', clave || 'test123', rol];
+        
+        console.log('📝 Query a ejecutar:', insertQuery);
+        console.log('📝 Parámetros:', insertParams);
+        
+        // NO ejecutar la inserción, solo simular
+        console.log('⚠️ SIMULACIÓN - no se ejecutará la inserción real');
+        
+        // Paso 8: Verificar conteo actual de usuarios
+        const [userCount] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
+        console.log('📊 Total usuarios actuales:', userCount[0].count);
+        
+        // Respuesta de debug
+        res.json({
+            debug: 'Test de creación de usuario',
+            status: 'OK',
+            datos_recibidos: req.body,
+            roles_disponibles: rolesDisponibles,
+            rol_valido: rolExists.length > 0,
+            id_generado: userId,
+            usuario_existe: userExists.length > 0,
+            estructura_tabla: tableStructure,
+            query_preparado: insertQuery,
+            parametros: insertParams,
+            total_usuarios: userCount[0].count
+        });
+        
+    } catch (error) {
+        console.error('💥 ERROR en debug:', error);
+        console.error('📋 Error details:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            sql: error.sql,
+            sqlState: error.sqlState
+        });
+        
+        res.status(500).json({
+            error: 'Error en debug',
+            details: error.message,
+            code: error.code,
+            errno: error.errno,
+            sql: error.sql
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+            console.log('🔓 Conexión liberada');
+        }
+    }
+});
+
+// =============================================
+// VERSIÓN SIMPLIFICADA DEL POST USUARIOS
+// =============================================
+
+// Reemplazar el POST /api/usuarios actual con esta versión simplificada
 app.post('/api/usuarios', async (req, res) => {
     let connection;
     try {
-        console.log('📝 Creando usuario con datos:', req.body);
+        console.log('\n📝 CREANDO USUARIO...');
+        console.log('📋 Body:', JSON.stringify(req.body, null, 2));
         
         connection = await pool.getConnection();
         
-        // Extraer y validar campos
-        const { 
-            nombre, 
-            apellido, 
-            email,
-            password,
-            clave,
-            rol = 'API' // Por defecto Apicultor
-        } = req.body;
+        const { nombre, apellido, clave, rol = 'API' } = req.body;
         
-        // Determinar valores finales
-        const nombreFinal = (nombre || email || '').trim();
-        const apellidoFinal = (apellido || 'Apellido').trim();
-        const claveFinal = (clave || password || '').trim();
-        const rolFinal = rol; // Mantener como string
-        
-        console.log('📝 Datos procesados:', {
-            nombre: nombreFinal,
-            apellido: apellidoFinal,
-            clave: claveFinal ? '[OCULTA]' : '[VACÍA]',
-            rol: rolFinal
-        });
-        
-        // Validar campos requeridos
-        if (!nombreFinal || !apellidoFinal || !claveFinal) {
+        // Validaciones básicas
+        if (!nombre || !apellido || !clave) {
+            console.log('❌ Validación fallida');
             return res.status(400).json({ 
-                error: 'Nombre, apellido y contraseña son obligatorios',
-                received: {
-                    nombre: !!nombreFinal,
-                    apellido: !!apellidoFinal,
-                    clave: !!claveFinal,
-                    rol: rolFinal
-                }
+                error: 'Nombre, apellido y clave son obligatorios' 
             });
         }
         
-        // Verificar que el rol existe (solo ADM y API según datos oficiales)
-        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rolFinal]);
+        // Verificar rol
+        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
         if (rolExists.length === 0) {
+            console.log('❌ Rol no válido:', rol);
             return res.status(400).json({ 
-                error: `El rol '${rolFinal}' no existe. Roles válidos: ADM, API` 
+                error: `Rol '${rol}' no existe. Roles válidos: ADM, API` 
             });
         }
         
-        // Generar ID único para el usuario (según tu esquema varchar(16))
+        // Generar ID
         const userId = `USR_${Date.now().toString().slice(-8)}_${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+        console.log('🆔 ID generado:', userId);
         
-        // Verificar si el usuario ya existe (por nombre)
-        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombreFinal]);
+        // Verificar usuario existente
+        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombre.trim()]);
         if (userExists.length > 0) {
+            console.log('❌ Usuario ya existe');
             return res.status(400).json({ 
                 error: 'Ya existe un usuario con ese nombre' 
             });
         }
         
         // Insertar usuario
-        const [result] = await connection.execute(`
+        console.log('💾 Insertando usuario...');
+        await connection.execute(`
             INSERT INTO usuario (id, nombre, apellido, clave, rol, activo) 
             VALUES (?, ?, ?, ?, ?, 1)
-        `, [userId, nombreFinal, apellidoFinal, claveFinal, rolFinal]);
+        `, [userId, nombre.trim(), apellido.trim(), clave.trim(), rol]);
         
         console.log('✅ Usuario creado exitosamente:', userId);
         
-        // Obtener el usuario creado con información del rol
+        // Obtener usuario creado
         const [newUser] = await connection.execute(`
             SELECT u.id, u.nombre, u.apellido, u.rol, u.activo,
                    r.descripcion as rol_nombre
@@ -388,9 +467,6 @@ app.post('/api/usuarios', async (req, res) => {
                 id: newUser[0].id,
                 nombre: newUser[0].nombre,
                 apellido: newUser[0].apellido,
-                email: newUser[0].nombre,
-                telefono: '',
-                fecha_registro: new Date().toISOString(),
                 rol: newUser[0].rol,
                 rol_nombre: newUser[0].rol_nombre || 'Usuario',
                 activo: newUser[0].activo
@@ -398,17 +474,78 @@ app.post('/api/usuarios', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('💥 Error creando usuario:', error);
-        console.error('Error details:', {
+        console.error('💥 ERROR CREANDO USUARIO:', error);
+        console.error('📋 Error completo:', {
             message: error.message,
             code: error.code,
             errno: error.errno,
-            sql: error.sql
+            sql: error.sql,
+            sqlState: error.sqlState,
+            sqlMessage: error.sqlMessage
         });
         
         res.status(500).json({ 
             error: 'Error creando usuario',
-            details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno del servidor'
+            details: error.message,
+            code: error.code
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// ENDPOINT PARA VERIFICAR ESTADO DE LA BD
+// =============================================
+
+app.get('/api/debug/database-status', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        
+        // Verificar conexión
+        const [connectionTest] = await connection.execute('SELECT 1 as test');
+        
+        // Verificar tabla usuario
+        const [userTableExists] = await connection.execute(`
+            SELECT TABLE_NAME 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuario'
+        `);
+        
+        // Verificar tabla rol
+        const [rolTableExists] = await connection.execute(`
+            SELECT TABLE_NAME 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rol'
+        `);
+        
+        // Contar registros
+        const [userCount] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
+        const [rolCount] = await connection.execute('SELECT COUNT(*) as count FROM rol');
+        
+        // Verificar roles específicos
+        const [roles] = await connection.execute('SELECT rol, descripcion FROM rol');
+        
+        res.json({
+            database: 'Connected',
+            connection_test: connectionTest[0].test === 1,
+            tables: {
+                usuario_exists: userTableExists.length > 0,
+                rol_exists: rolTableExists.length > 0
+            },
+            counts: {
+                usuarios: userCount[0].count,
+                roles: rolCount[0].count
+            },
+            roles_available: roles
+        });
+        
+    } catch (error) {
+        console.error('Error checking database status:', error);
+        res.status(500).json({ 
+            error: 'Error checking database status',
+            details: error.message 
         });
     } finally {
         if (connection) connection.release();

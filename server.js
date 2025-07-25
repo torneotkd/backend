@@ -256,8 +256,266 @@ app.post('/api/usuarios/login', async (req, res) => {
     }
 });
 
+const express = require('express');
+const mysql = require('mysql2/promise');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// Configuración de Railway MySQL usando variables de entorno
+const dbConfig = {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    ssl: {
+        rejectUnauthorized: false
+    }
+};
+const pool = mysql.createPool(dbConfig);
+
+app.use(cors({
+  origin: [
+    'https://datos-github-io-gamma.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:8080'
+  ],
+  credentials: true
+}));
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Middleware de logging mejorado
+app.use((req, res, next) => {
+    console.log(`\n🔄 ${new Date().toISOString()} - ${req.method} ${req.path}`);
+    if (req.method === 'POST' || req.method === 'PUT') {
+        console.log('📝 Body:', JSON.stringify(req.body, null, 2));
+    }
+    if (Object.keys(req.query).length > 0) {
+        console.log('🔍 Query:', JSON.stringify(req.query, null, 2));
+    }
+    next();
+});
+
+// Wrapper para manejar errores de base de datos
+const safeDbQuery = async (queryFn, fallbackValue = []) => {
+    try {
+        return await queryFn();
+    } catch (error) {
+        console.error('💥 Database Error:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            sql: error.sql
+        });
+        return fallbackValue;
+    }
+};
+
 // =============================================
-// RUTAS PARA USUARIOS
+// RUTAS BÁSICAS Y DE DEBUG
+// =============================================
+
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        message: 'SmartBee API funcionando correctamente',
+        timestamp: new Date().toISOString(),
+        database: 'Railway MySQL'
+    });
+});
+
+app.get('/api/test-db', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        const [rows] = await connection.execute('SELECT 1 as test, NOW() as timestamp');
+        res.json({ 
+            connected: true,
+            test: rows[0].test,
+            timestamp: rows[0].timestamp
+        });
+    } catch (error) {
+        console.error('Error en test-db:', error);
+        res.status(500).json({ 
+            connected: false,
+            error: error.message
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/debug/check-tables', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        
+        // Verificar qué tablas existen
+        const [tables] = await connection.execute(`
+            SELECT TABLE_NAME 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = DATABASE()
+            ORDER BY TABLE_NAME
+        `);
+        
+        const tableNames = tables.map(t => t.TABLE_NAME);
+        
+        // Verificar estructura de tablas principales
+        const tableInfo = {};
+        
+        for (const tableName of ['usuario', 'rol', 'colmena', 'colmena_ubicacion', 'mensaje', 'nodo', 'nodo_tipo']) {
+            if (tableNames.includes(tableName)) {
+                try {
+                    const [columns] = await connection.execute(`DESCRIBE ${tableName}`);
+                    const [count] = await connection.execute(`SELECT COUNT(*) as count FROM ${tableName}`);
+                    
+                    tableInfo[tableName] = {
+                        exists: true,
+                        columns: columns.map(c => ({ field: c.Field, type: c.Type, key: c.Key })),
+                        rowCount: count[0].count
+                    };
+                } catch (e) {
+                    tableInfo[tableName] = {
+                        exists: false,
+                        error: e.message
+                    };
+                }
+            } else {
+                tableInfo[tableName] = {
+                    exists: false,
+                    error: 'Tabla no encontrada'
+                };
+            }
+        }
+        
+        res.json({
+            database: 'Connected',
+            allTables: tableNames,
+            requiredTables: tableInfo
+        });
+        
+    } catch (error) {
+        console.error('Error checking database structure:', error);
+        res.status(500).json({ 
+            error: 'Error checking database structure',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/test-connection', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔗 Probando conexión...');
+        connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida');
+        
+        const [result] = await connection.execute('SELECT 1 as test, NOW() as time');
+        console.log('✅ Query ejecutada:', result[0]);
+        
+        res.json({ 
+            success: true, 
+            result: result[0],
+            message: 'Conexión exitosa'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error de conexión:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            code: error.code 
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+            console.log('🔓 Conexión liberada');
+        }
+    }
+});
+
+// =============================================
+// RUTAS DE AUTENTICACIÓN
+// =============================================
+
+app.post('/api/usuarios/login', async (req, res) => {
+    let connection;
+    try {
+        const { email, password } = req.body;
+        
+        console.log('🔐 Login attempt:', { email });
+        
+        if (!email || !password) {
+            return res.status(400).json({ 
+                error: 'Email y contraseña son requeridos' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Buscar usuario por nombre (ya que no tienes campo email en tu esquema)
+        const [rows] = await connection.execute(`
+            SELECT u.id, u.clave, u.nombre, u.apellido, u.rol, r.descripcion as rol_descripcion
+            FROM usuario u
+            LEFT JOIN rol r ON u.rol = r.rol
+            WHERE u.nombre = ?
+        `, [email]);
+        
+        if (rows.length === 0) {
+            return res.status(401).json({ 
+                error: 'Credenciales inválidas' 
+            });
+        }
+        
+        const usuario = rows[0];
+        
+        // Verificar contraseña (en tu esquema están en texto plano)
+        const validPassword = (usuario.clave === password);
+        
+        if (!validPassword) {
+            return res.status(401).json({ 
+                error: 'Credenciales inválidas' 
+            });
+        }
+        
+        console.log('✅ Login exitoso:', { id: usuario.id, nombre: usuario.nombre });
+        
+        const token = `smartbee_${usuario.id}_${Date.now()}`;
+        
+        res.json({
+            data: {
+                token: token,
+                usuario: {
+                    id: usuario.id,
+                    nombre: usuario.nombre,
+                    apellido: usuario.apellido,
+                    email: usuario.nombre, // Usar nombre como email
+                    rol_nombre: usuario.rol_descripcion || 'Usuario'
+                }
+            },
+            message: 'Login exitoso'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error en login:', error);
+        res.status(500).json({ 
+            error: 'Error interno del servidor'
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// RUTAS PARA USUARIOS - CORREGIDAS PARA ESQUEMA REAL
 // =============================================
 
 app.get('/api/usuarios', async (req, res) => {
@@ -268,14 +526,15 @@ app.get('/api/usuarios', async (req, res) => {
         connection = await pool.getConnection();
         
         const [rows] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.clave, u.rol,
+            SELECT u.id, u.nombre, u.apellido, u.clave, u.rol, u.activo,
                    r.descripcion as rol_nombre
             FROM usuario u 
             LEFT JOIN rol r ON u.rol = r.rol 
+            WHERE u.activo = 1
             ORDER BY u.id ASC
         `);
         
-        // Incluir tanto el rol (ID) como el rol_nombre
+        // Formatear datos para el frontend
         const usuarios = rows.map(user => ({
             id: user.id,
             nombre: user.nombre,
@@ -283,8 +542,9 @@ app.get('/api/usuarios', async (req, res) => {
             email: user.nombre, // Usar nombre como email temporalmente
             telefono: '', // No existe en tu esquema
             fecha_registro: new Date().toISOString(), // Temporalmente
-            rol: user.rol, // ID del rol (1, 2, 3)
-            rol_nombre: user.rol_nombre || 'Usuario' // Nombre del rol
+            rol: user.rol, // String como 'ADM', 'API', 'INV'
+            rol_nombre: user.rol_nombre || 'Usuario', // Nombre descriptivo del rol
+            activo: user.activo
         }));
         
         console.log('✅ Usuarios obtenidos:', usuarios.length);
@@ -314,14 +574,14 @@ app.post('/api/usuarios', async (req, res) => {
             email,
             password,
             clave,
-            rol = 2
+            rol = 'API' // Por defecto Apicultor
         } = req.body;
         
-        // Determinar valores finales con validación
+        // Determinar valores finales
         const nombreFinal = (nombre || email || '').trim();
         const apellidoFinal = (apellido || 'Apellido').trim();
         const claveFinal = (clave || password || '').trim();
-        let rolFinal = parseInt(rol) || 2;
+        const rolFinal = rol; // Mantener como string
         
         console.log('📝 Datos procesados:', {
             nombre: nombreFinal,
@@ -343,14 +603,18 @@ app.post('/api/usuarios', async (req, res) => {
             });
         }
         
-        // Verificar que el rol existe
+        // Verificar que el rol existe (solo ADM y API según datos oficiales)
         const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rolFinal]);
         if (rolExists.length === 0) {
-            console.log('⚠️ Rol no existe, usando rol 2 por defecto');
-            rolFinal = 2;
+            return res.status(400).json({ 
+                error: `El rol '${rolFinal}' no existe. Roles válidos: ADM, API` 
+            });
         }
         
-        // Verificar si el usuario ya existe
+        // Generar ID único para el usuario (según tu esquema varchar(16))
+        const userId = `USR_${Date.now().toString().slice(-8)}_${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+        
+        // Verificar si el usuario ya existe (por nombre)
         const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombreFinal]);
         if (userExists.length > 0) {
             return res.status(400).json({ 
@@ -360,23 +624,23 @@ app.post('/api/usuarios', async (req, res) => {
         
         // Insertar usuario
         const [result] = await connection.execute(`
-            INSERT INTO usuario (nombre, apellido, clave, rol) 
-            VALUES (?, ?, ?, ?)
-        `, [nombreFinal, apellidoFinal, claveFinal, rolFinal]);
+            INSERT INTO usuario (id, nombre, apellido, clave, rol, activo) 
+            VALUES (?, ?, ?, ?, ?, 1)
+        `, [userId, nombreFinal, apellidoFinal, claveFinal, rolFinal]);
         
-        console.log('✅ Usuario creado exitosamente:', result.insertId);
+        console.log('✅ Usuario creado exitosamente:', userId);
         
         // Obtener el usuario creado con información del rol
         const [newUser] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.rol,
+            SELECT u.id, u.nombre, u.apellido, u.rol, u.activo,
                    r.descripcion as rol_nombre
             FROM usuario u
             LEFT JOIN rol r ON u.rol = r.rol
             WHERE u.id = ?
-        `, [result.insertId]);
+        `, [userId]);
         
         res.status(201).json({ 
-            id: result.insertId,
+            id: userId,
             message: 'Usuario creado exitosamente',
             usuario: {
                 id: newUser[0].id,
@@ -386,7 +650,8 @@ app.post('/api/usuarios', async (req, res) => {
                 telefono: '',
                 fecha_registro: new Date().toISOString(),
                 rol: newUser[0].rol,
-                rol_nombre: newUser[0].rol_nombre || 'Usuario'
+                rol_nombre: newUser[0].rol_nombre || 'Usuario',
+                activo: newUser[0].activo
             }
         });
         
@@ -419,7 +684,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
         connection = await pool.getConnection();
         
         // Verificar que el usuario existe
-        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE id = ?', [id]);
+        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [id]);
         if (userExists.length === 0) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
@@ -431,10 +696,12 @@ app.put('/api/usuarios/:id', async (req, res) => {
             });
         }
         
-        // Verificar que el rol existe
+        // Verificar que el rol existe (solo ADM y API según datos oficiales)
         const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
         if (rolExists.length === 0) {
-            return res.status(400).json({ error: 'El rol especificado no existe' });
+            return res.status(400).json({ 
+                error: `El rol '${rol}' no existe. Roles válidos: ADM, API` 
+            });
         }
         
         // Preparar la consulta de actualización
@@ -448,7 +715,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
                 SET nombre = ?, apellido = ?, clave = ?, rol = ?
                 WHERE id = ?
             `;
-            updateParams = [nombre.trim(), apellido.trim(), clave.trim(), parseInt(rol), id];
+            updateParams = [nombre.trim(), apellido.trim(), clave.trim(), rol, id];
         } else {
             // Actualizar sin cambiar la clave
             updateQuery = `
@@ -456,7 +723,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
                 SET nombre = ?, apellido = ?, rol = ?
                 WHERE id = ?
             `;
-            updateParams = [nombre.trim(), apellido.trim(), parseInt(rol), id];
+            updateParams = [nombre.trim(), apellido.trim(), rol, id];
         }
         
         // Ejecutar actualización
@@ -466,7 +733,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
         
         // Obtener el usuario actualizado para devolverlo
         const [updatedUser] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.rol,
+            SELECT u.id, u.nombre, u.apellido, u.rol, u.activo,
                    r.descripcion as rol_nombre
             FROM usuario u
             LEFT JOIN rol r ON u.rol = r.rol
@@ -482,8 +749,9 @@ app.put('/api/usuarios/:id', async (req, res) => {
                 email: updatedUser[0].nombre,
                 telefono: '',
                 fecha_registro: new Date().toISOString(),
+                rol: updatedUser[0].rol,
                 rol_nombre: updatedUser[0].rol_nombre || 'Usuario',
-                rol: updatedUser[0].rol
+                activo: updatedUser[0].activo
             }
         });
         
@@ -508,7 +776,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         connection = await pool.getConnection();
         
         // Verificar que el usuario existe
-        const [userExists] = await connection.execute('SELECT id, nombre, apellido FROM usuario WHERE id = ?', [id]);
+        const [userExists] = await connection.execute('SELECT id, nombre, apellido FROM usuario WHERE id = ? AND activo = 1', [id]);
         if (userExists.length === 0) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
@@ -516,7 +784,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         const usuario = userExists[0];
         
         // Verificar si el usuario tiene colmenas asociadas
-        const [colmenasAsociadas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ?', [id]);
+        const [colmenasAsociadas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ? AND activo = 1', [id]);
         
         if (colmenasAsociadas[0].count > 0) {
             return res.status(400).json({ 
@@ -524,13 +792,13 @@ app.delete('/api/usuarios/:id', async (req, res) => {
             });
         }
         
-        // Eliminar usuario
-        await connection.execute('DELETE FROM usuario WHERE id = ?', [id]);
+        // En lugar de eliminar, marcar como inactivo (soft delete)
+        await connection.execute('UPDATE usuario SET activo = 0 WHERE id = ?', [id]);
         
-        console.log('✅ Usuario eliminado:', id);
+        console.log('✅ Usuario marcado como inactivo:', id);
         res.json({ 
             message: `Usuario "${usuario.nombre} ${usuario.apellido}" eliminado correctamente`,
-            id: parseInt(id)
+            id: id
         });
         
     } catch (error) {
@@ -552,44 +820,503 @@ app.delete('/api/usuarios/:id', async (req, res) => {
     }
 });
 
-app.get('/api/usuarios/:id', async (req, res) => {
+// =============================================
+// RUTAS PARA ROLES - CORREGIDAS PARA ESQUEMA REAL
+// =============================================
+
+app.get('/api/roles', async (req, res) => {
     let connection;
     try {
-        const { id } = req.params;
-        
-        console.log(`🔍 Obteniendo usuario ${id}`);
+        console.log('👥 Obteniendo roles...');
         
         connection = await pool.getConnection();
         
         const [rows] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.clave, u.rol,
-                   r.descripcion as rol_nombre
-            FROM usuario u 
-            LEFT JOIN rol r ON u.rol = r.rol 
-            WHERE u.id = ?
-        `, [id]);
+            SELECT rol as id, rol, descripcion 
+            FROM rol 
+            ORDER BY rol
+        `);
         
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
+        console.log('✅ Roles obtenidos:', rows.length);
+        res.json(rows);
+    } catch (error) {
+        console.error('💥 Error obteniendo roles:', error);
+        res.status(500).json({ error: 'Error obteniendo roles' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// RUTAS PARA COLMENAS - CORREGIDAS PARA ESQUEMA REAL
+// =============================================
+
+app.get('/api/colmenas', async (req, res) => {
+    let connection;
+    try {
+        console.log('🏠 Obteniendo colmenas...');
+        
+        connection = await pool.getConnection();
+        
+        const [colmenas] = await connection.execute(`
+            SELECT c.id, c.descripcion, c.dueno, c.activo,
+                   u.nombre as dueno_nombre, u.apellido as dueno_apellido
+            FROM colmena c
+            LEFT JOIN usuario u ON c.dueno = u.id
+            WHERE c.activo = 1
+            ORDER BY c.id ASC
+        `);
+        
+        // Intentar obtener ubicaciones de los nodos asociados
+        let ubicacionesMap = {};
+        try {
+            const [ubicaciones] = await connection.execute(`
+                SELECT nc.colmena_id, nu.latitud, nu.longitud, nu.comuna, nu.descripcion as ubicacion_descripcion
+                FROM nodo_colmena nc
+                JOIN nodo_ubicacion nu ON nc.nodo_id = nu.nodo_id
+                WHERE nu.activo = 1
+                ORDER BY nu.fecha DESC
+            `);
+            
+            ubicaciones.forEach(ub => {
+                if (!ubicacionesMap[ub.colmena_id]) {
+                    ubicacionesMap[ub.colmena_id] = ub;
+                }
+            });
+        } catch (ubicacionError) {
+            console.log('⚠️ No se pudieron obtener ubicaciones de nodos');
         }
         
-        const usuario = {
-            id: rows[0].id,
-            nombre: rows[0].nombre,
-            apellido: rows[0].apellido,
-            email: rows[0].nombre,
-            telefono: '',
-            fecha_registro: new Date().toISOString(),
-            rol_nombre: rows[0].rol_nombre || 'Usuario',
-            rol: rows[0].rol
-        };
+        // Formatear para compatibilidad con frontend
+        const colmenasFormateadas = colmenas.map(colmena => {
+            const ubicacion = ubicacionesMap[colmena.id] || {};
+            
+            return {
+                id: colmena.id,
+                nombre: `Colmena ${colmena.id}`,
+                tipo: 'Langstroth',
+                descripcion: colmena.descripcion,
+                dueno: colmena.dueno,
+                dueno_nombre: colmena.dueno_nombre,
+                dueno_apellido: colmena.dueno_apellido,
+                apiario_id: null,
+                apiario_nombre: ubicacion.comuna || 'Sin ubicación',
+                fecha_instalacion: new Date().toISOString(),
+                activa: colmena.activo,
+                latitud: ubicacion.latitud || null,
+                longitud: ubicacion.longitud || null,
+                ubicacion: ubicacion.ubicacion_descripcion || null,
+                comuna: ubicacion.comuna || null
+            };
+        });
         
-        console.log('✅ Usuario obtenido:', usuario);
-        res.json(usuario);
+        console.log('✅ Colmenas obtenidas:', colmenasFormateadas.length);
+        res.json(colmenasFormateadas);
         
     } catch (error) {
-        console.error('💥 Error obteniendo usuario:', error);
-        res.status(500).json({ error: 'Error obteniendo usuario' });
+        console.error('💥 Error obteniendo colmenas:', error);
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo colmenas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.post('/api/colmenas', async (req, res) => {
+    let connection;
+    try {
+        console.log('➕ Creando nueva colmena con datos:', req.body);
+        
+        const { descripcion, dueno } = req.body;
+        
+        // Validar campos requeridos
+        if (!descripcion || !dueno) {
+            return res.status(400).json({ 
+                error: 'Descripción y dueño son obligatorios' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Verificar que el dueño existe
+        const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
+        if (duenoExists.length === 0) {
+            return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
+        }
+        
+        // Generar ID único para la colmena (según tu esquema varchar(64))
+        const colmenaId = `COL_${Date.now().toString()}_${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+        
+        // Insertar nueva colmena
+        await connection.execute(`
+            INSERT INTO colmena (id, descripcion, dueno, activo) 
+            VALUES (?, ?, ?, 1)
+        `, [colmenaId, descripcion.trim(), dueno]);
+        
+        console.log('✅ Colmena creada exitosamente:', colmenaId);
+        
+        // Devolver la colmena creada
+        const nuevaColmena = {
+            id: colmenaId,
+            descripcion: descripcion.trim(),
+            dueno: dueno,
+            activo: 1,
+            message: 'Colmena creada exitosamente'
+        };
+        
+        res.status(201).json(nuevaColmena);
+        
+    } catch (error) {
+        console.error('💥 Error creando colmena:', error);
+        res.status(500).json({ 
+            error: 'Error creando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// RUTAS PARA NODOS - CORREGIDAS PARA ESQUEMA REAL
+// =============================================
+
+app.get('/api/nodos', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔌 Obteniendo nodos...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo, n.activo,
+                   nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            WHERE n.activo = 1
+            ORDER BY n.id ASC
+        `);
+        
+        // Formatear para frontend
+        const nodos = rows.map(nodo => ({
+            id: nodo.id,
+            identificador: nodo.id,
+            descripcion: nodo.descripcion,
+            tipo: nodo.tipo_descripcion || nodo.tipo,
+            fecha_instalacion: new Date().toISOString(),
+            activo: nodo.activo
+        }));
+        
+        console.log('✅ Nodos obtenidos:', nodos.length);
+        res.json(nodos);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos:', error);
+        res.status(500).json({ error: 'Error obteniendo nodos' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/nodo-tipos', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔧 Obteniendo tipos de nodos...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT tipo as id, tipo, descripcion 
+            FROM nodo_tipo 
+            ORDER BY tipo ASC
+        `);
+        
+        console.log('✅ Tipos de nodos obtenidos:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo tipos de nodos:', error);
+        res.status(500).json({ error: 'Error obteniendo tipos de nodos' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// RUTAS PARA MENSAJES - CORREGIDAS PARA ESQUEMA REAL
+// =============================================
+
+app.get('/api/mensajes/recientes', async (req, res) => {
+    let connection;
+    try {
+        const { hours = 24 } = req.query;
+        
+        console.log('💬 Obteniendo mensajes recientes...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT nm.id, nm.nodo_id, nm.topico, nm.payload, nm.fecha,
+                   n.descripcion as nodo_descripcion
+            FROM nodo_mensaje nm
+            LEFT JOIN nodo n ON nm.nodo_id = n.id
+            WHERE nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+            ORDER BY nm.fecha DESC
+            LIMIT 100
+        `, [hours]);
+        
+        // Formatear para frontend
+        const mensajes = rows.map(mensaje => ({
+            id: mensaje.id,
+            nodo_id: mensaje.nodo_id,
+            nodo_identificador: mensaje.nodo_descripcion || mensaje.nodo_id,
+            topico: mensaje.topico,
+            payload: mensaje.payload,
+            fecha: mensaje.fecha
+        }));
+        
+        console.log('✅ Mensajes obtenidos:', mensajes.length);
+        res.json(mensajes);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo mensajes:', error);
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo mensajes',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// RUTAS PARA DASHBOARD - CORREGIDAS
+// =============================================
+
+app.get('/api/dashboard/stats', async (req, res) => {
+    let connection;
+    try {
+        console.log('📊 Obteniendo estadísticas del dashboard...');
+        
+        connection = await pool.getConnection();
+        
+        const [usuarios] = await connection.execute('SELECT COUNT(*) as count FROM usuario WHERE activo = 1');
+        const [colmenas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE activo = 1');
+        
+        // Contar mensajes de hoy
+        let mensajesHoy = [{ count: 0 }];
+        try {
+            const [mensajes] = await connection.execute(`
+                SELECT COUNT(*) as count FROM nodo_mensaje 
+                WHERE DATE(fecha) = CURDATE()
+            `);
+            mensajesHoy = mensajes;
+        } catch (mensajeError) {
+            console.log('⚠️ Tabla nodo_mensaje no encontrada, usando valor por defecto');
+        }
+        
+        const stats = {
+            totalColmenas: colmenas[0].count,
+            totalUsuarios: usuarios[0].count,
+            mensajesHoy: mensajesHoy[0].count,
+            colmenasActivas: colmenas[0].count
+        };
+        
+        console.log('✅ Estadísticas obtenidas:', stats);
+        res.json(stats);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo estadísticas:', error);
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo estadísticas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// VERIFICAR DATOS OFICIALES
+// =============================================
+
+app.get('/api/admin/verify-data', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔧 Verificando datos oficiales...');
+        
+        connection = await pool.getConnection();
+        
+        // Verificar roles
+        const [roles] = await connection.execute('SELECT rol, descripcion FROM rol ORDER BY rol');
+        
+        // Verificar tipos de nodos
+        const [nodoTipos] = await connection.execute('SELECT tipo, descripcion FROM nodo_tipo ORDER BY tipo');
+        
+        // Verificar nodos
+        const [nodos] = await connection.execute('SELECT COUNT(*) as count FROM nodo WHERE activo = 1');
+        
+        // Verificar ubicaciones de nodos
+        const [ubicaciones] = await connection.execute('SELECT COUNT(*) as count FROM nodo_ubicacion WHERE activo = 1');
+        
+        // Verificar alertas
+        const [alertas] = await connection.execute('SELECT COUNT(*) as count FROM alerta');
+        
+        // Verificar usuarios
+        const [usuarios] = await connection.execute('SELECT COUNT(*) as count FROM usuario WHERE activo = 1');
+        
+        res.json({
+            message: 'Verificación de datos oficiales completada',
+            data: {
+                roles: roles,
+                nodoTipos: nodoTipos,
+                counts: {
+                    nodos: nodos[0].count,
+                    ubicaciones: ubicaciones[0].count,
+                    alertas: alertas[0].count,
+                    usuarios: usuarios[0].count
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('💥 Error verificando datos:', error);
+        res.status(500).json({ 
+            error: 'Error verificando datos',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// CREAR USUARIO ROOT OFICIAL
+// =============================================
+
+app.post('/api/admin/create-root', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔧 Creando usuario root oficial...');
+        
+        const { clave } = req.body;
+        
+        if (!clave) {
+            return res.status(400).json({ 
+                error: 'Se requiere una clave para el usuario root' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Verificar si ya existe el usuario root
+        const [rootExists] = await connection.execute('SELECT id FROM usuario WHERE id = ?', ['root']);
+        
+        if (rootExists.length > 0) {
+            return res.status(400).json({ 
+                error: 'El usuario root ya existe' 
+            });
+        }
+        
+        // Crear usuario root según las especificaciones oficiales
+        await connection.execute(`
+            INSERT INTO usuario (id, clave, nombre, apellido, rol, activo) 
+            VALUES (?, ?, ?, ?, ?, 1)
+        `, ['root', clave, 'Roberto', 'Carraso', 'ADM']);
+        
+        console.log('✅ Usuario root creado exitosamente');
+        
+        res.json({
+            message: 'Usuario root creado exitosamente',
+            usuario: {
+                id: 'root',
+                nombre: 'Roberto',
+                apellido: 'Carraso',
+                rol: 'ADM'
+            }
+        });
+        
+    } catch (error) {
+        console.error('💥 Error creando usuario root:', error);
+        res.status(500).json({ 
+            error: 'Error creando usuario root',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// ENDPOINT PARA VERIFICAR Y PREPARAR BASE DE DATOS
+// =============================================
+
+app.get('/api/admin/check-schema', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        
+        // Verificar todas las tablas del esquema
+        const requiredTables = [
+            'rol', 'usuario', 'nodo_tipo', 'nodo', 'colmena', 
+            'nodo_colmena', 'nodo_mensaje', 'nodo_ubicacion', 'nodo_alerta', 'alerta'
+        ];
+        
+        const tableInfo = {};
+        
+        for (const tableName of requiredTables) {
+            try {
+                const [exists] = await connection.execute(`
+                    SELECT TABLE_NAME 
+                    FROM information_schema.TABLES 
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+                `, [tableName]);
+                
+                if (exists.length > 0) {
+                    const [count] = await connection.execute(`SELECT COUNT(*) as count FROM ${tableName}`);
+                    const [columns] = await connection.execute(`DESCRIBE ${tableName}`);
+                    
+                    tableInfo[tableName] = {
+                        exists: true,
+                        rowCount: count[0].count,
+                        columns: columns.length
+                    };
+                } else {
+                    tableInfo[tableName] = {
+                        exists: false,
+                        error: 'Tabla no encontrada'
+                    };
+                }
+            } catch (e) {
+                tableInfo[tableName] = {
+                    exists: false,
+                    error: e.message
+                };
+            }
+        }
+        
+        res.json({
+            database: 'Connected',
+            schema: 'smartbee',
+            tables: tableInfo,
+            summary: {
+                total: requiredTables.length,
+                existing: Object.values(tableInfo).filter(t => t.exists).length,
+                missing: Object.values(tableInfo).filter(t => !t.exists).length
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error checking schema:', error);
+        res.status(500).json({ 
+            error: 'Error checking database schema',
+            details: error.message 
+        });
     } finally {
         if (connection) connection.release();
     }

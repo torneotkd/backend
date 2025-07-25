@@ -33,14 +33,35 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Middleware de logging
+// Middleware de logging mejorado
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    console.log(`\n🔄 ${new Date().toISOString()} - ${req.method} ${req.path}`);
+    if (req.method === 'POST' || req.method === 'PUT') {
+        console.log('📝 Body:', JSON.stringify(req.body, null, 2));
+    }
+    if (Object.keys(req.query).length > 0) {
+        console.log('🔍 Query:', JSON.stringify(req.query, null, 2));
+    }
     next();
 });
 
+// Wrapper para manejar errores de base de datos
+const safeDbQuery = async (queryFn, fallbackValue = []) => {
+    try {
+        return await queryFn();
+    } catch (error) {
+        console.error('💥 Database Error:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            sql: error.sql
+        });
+        return fallbackValue;
+    }
+};
+
 // =============================================
-// RUTAS BÁSICAS
+// RUTAS BÁSICAS Y DE DEBUG
 // =============================================
 
 app.get('/api/health', (req, res) => {
@@ -52,8 +73,10 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/test-db', async (req, res) => {
+    let connection;
     try {
-        const [rows] = await pool.execute('SELECT 1 as test, NOW() as timestamp');
+        connection = await pool.getConnection();
+        const [rows] = await connection.execute('SELECT 1 as test, NOW() as timestamp');
         res.json({ 
             connected: true,
             test: rows[0].test,
@@ -65,6 +88,99 @@ app.get('/api/test-db', async (req, res) => {
             connected: false,
             error: error.message
         });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/debug/check-tables', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        
+        // Verificar qué tablas existen
+        const [tables] = await connection.execute(`
+            SELECT TABLE_NAME 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = DATABASE()
+            ORDER BY TABLE_NAME
+        `);
+        
+        const tableNames = tables.map(t => t.TABLE_NAME);
+        
+        // Verificar estructura de tablas principales
+        const tableInfo = {};
+        
+        for (const tableName of ['usuario', 'rol', 'colmena', 'colmena_ubicacion', 'mensaje', 'nodo', 'nodo_tipo']) {
+            if (tableNames.includes(tableName)) {
+                try {
+                    const [columns] = await connection.execute(`DESCRIBE ${tableName}`);
+                    const [count] = await connection.execute(`SELECT COUNT(*) as count FROM ${tableName}`);
+                    
+                    tableInfo[tableName] = {
+                        exists: true,
+                        columns: columns.map(c => ({ field: c.Field, type: c.Type, key: c.Key })),
+                        rowCount: count[0].count
+                    };
+                } catch (e) {
+                    tableInfo[tableName] = {
+                        exists: false,
+                        error: e.message
+                    };
+                }
+            } else {
+                tableInfo[tableName] = {
+                    exists: false,
+                    error: 'Tabla no encontrada'
+                };
+            }
+        }
+        
+        res.json({
+            database: 'Connected',
+            allTables: tableNames,
+            requiredTables: tableInfo
+        });
+        
+    } catch (error) {
+        console.error('Error checking database structure:', error);
+        res.status(500).json({ 
+            error: 'Error checking database structure',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/test-connection', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔗 Probando conexión...');
+        connection = await pool.getConnection();
+        console.log('✅ Conexión obtenida');
+        
+        const [result] = await connection.execute('SELECT 1 as test, NOW() as time');
+        console.log('✅ Query ejecutada:', result[0]);
+        
+        res.json({ 
+            success: true, 
+            result: result[0],
+            message: 'Conexión exitosa'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error de conexión:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            code: error.code 
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+            console.log('🔓 Conexión liberada');
+        }
     }
 });
 
@@ -73,6 +189,7 @@ app.get('/api/test-db', async (req, res) => {
 // =============================================
 
 app.post('/api/usuarios/login', async (req, res) => {
+    let connection;
     try {
         const { email, password } = req.body;
         
@@ -84,8 +201,10 @@ app.post('/api/usuarios/login', async (req, res) => {
             });
         }
         
+        connection = await pool.getConnection();
+        
         // Buscar usuario por nombre (ya que no tienes campo email en tu esquema)
-        const [rows] = await pool.execute(`
+        const [rows] = await connection.execute(`
             SELECT u.id, u.clave, u.nombre, u.apellido, u.rol, r.descripcion as rol_descripcion
             FROM usuario u
             LEFT JOIN rol r ON u.rol = r.rol
@@ -132,6 +251,8 @@ app.post('/api/usuarios/login', async (req, res) => {
         res.status(500).json({ 
             error: 'Error interno del servidor'
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
@@ -140,10 +261,13 @@ app.post('/api/usuarios/login', async (req, res) => {
 // =============================================
 
 app.get('/api/usuarios', async (req, res) => {
+    let connection;
     try {
         console.log('📋 Obteniendo usuarios...');
         
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
             SELECT u.id, u.nombre, u.apellido, u.clave, u.rol,
                    r.descripcion as rol_nombre
             FROM usuario u 
@@ -151,7 +275,7 @@ app.get('/api/usuarios', async (req, res) => {
             ORDER BY u.id ASC
         `);
         
-        // CORREGIDO: Ahora incluimos tanto el rol (ID) como el rol_nombre
+        // Incluir tanto el rol (ID) como el rol_nombre
         const usuarios = rows.map(user => ({
             id: user.id,
             nombre: user.nombre,
@@ -159,72 +283,91 @@ app.get('/api/usuarios', async (req, res) => {
             email: user.nombre, // Usar nombre como email temporalmente
             telefono: '', // No existe en tu esquema
             fecha_registro: new Date().toISOString(), // Temporalmente
-            rol: user.rol, // ✅ AGREGADO: ID del rol (1, 2, 3)
-            rol_nombre: user.rol_nombre || 'Usuario' // ✅ MANTENIDO: Nombre del rol
+            rol: user.rol, // ID del rol (1, 2, 3)
+            rol_nombre: user.rol_nombre || 'Usuario' // Nombre del rol
         }));
         
         console.log('✅ Usuarios obtenidos:', usuarios.length);
-        console.log('🔍 Primer usuario con rol:', usuarios[0]); // Debug
         res.json(usuarios);
     } catch (error) {
         console.error('💥 Error obteniendo usuarios:', error);
-        res.status(500).json({ error: 'Error obteniendo usuarios' });
+        res.status(500).json({ 
+            error: 'Error obteniendo usuarios',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// REEMPLAZA el endpoint POST /api/usuarios en tu server.js con este:
-
 app.post('/api/usuarios', async (req, res) => {
+    let connection;
     try {
         console.log('📝 Creando usuario con datos:', req.body);
         
-        // Extraer campos del frontend y mapear a tu esquema
+        connection = await pool.getConnection();
+        
+        // Extraer y validar campos
         const { 
             nombre, 
             apellido, 
-            email,        // El frontend envía email, pero usamos como nombre si no hay nombre
-            password,     // El frontend envía password, mapeamos a clave
-            clave,        // O puede enviar clave directamente
-            rol = 2       // Por defecto rol 2 (Apicultor)
+            email,
+            password,
+            clave,
+            rol = 2
         } = req.body;
         
-        // Determinar valores finales
-        const nombreFinal = nombre || email || 'Usuario';
-        const apellidoFinal = apellido || 'Apellido';
-        const claveFinal = clave || password || '1234';
+        // Determinar valores finales con validación
+        const nombreFinal = (nombre || email || '').trim();
+        const apellidoFinal = (apellido || 'Apellido').trim();
+        const claveFinal = (clave || password || '').trim();
+        let rolFinal = parseInt(rol) || 2;
         
         console.log('📝 Datos procesados:', {
             nombre: nombreFinal,
             apellido: apellidoFinal,
-            clave: claveFinal,
-            rol: rol
+            clave: claveFinal ? '[OCULTA]' : '[VACÍA]',
+            rol: rolFinal
         });
         
         // Validar campos requeridos
         if (!nombreFinal || !apellidoFinal || !claveFinal) {
             return res.status(400).json({ 
                 error: 'Nombre, apellido y contraseña son obligatorios',
-                received: req.body
+                received: {
+                    nombre: !!nombreFinal,
+                    apellido: !!apellidoFinal,
+                    clave: !!claveFinal,
+                    rol: rolFinal
+                }
             });
         }
         
         // Verificar que el rol existe
-        const [rolExists] = await pool.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
+        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rolFinal]);
         if (rolExists.length === 0) {
             console.log('⚠️ Rol no existe, usando rol 2 por defecto');
-            rol = 2;
+            rolFinal = 2;
+        }
+        
+        // Verificar si el usuario ya existe
+        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE nombre = ?', [nombreFinal]);
+        if (userExists.length > 0) {
+            return res.status(400).json({ 
+                error: 'Ya existe un usuario con ese nombre' 
+            });
         }
         
         // Insertar usuario
-        const [result] = await pool.execute(`
+        const [result] = await connection.execute(`
             INSERT INTO usuario (nombre, apellido, clave, rol) 
             VALUES (?, ?, ?, ?)
-        `, [nombreFinal, apellidoFinal, claveFinal, rol]);
+        `, [nombreFinal, apellidoFinal, claveFinal, rolFinal]);
         
         console.log('✅ Usuario creado exitosamente:', result.insertId);
         
-        // Obtener el usuario creado para devolverlo
-        const [newUser] = await pool.execute(`
+        // Obtener el usuario creado con información del rol
+        const [newUser] = await connection.execute(`
             SELECT u.id, u.nombre, u.apellido, u.rol,
                    r.descripcion as rol_nombre
             FROM usuario u
@@ -239,17 +382,16 @@ app.post('/api/usuarios', async (req, res) => {
                 id: newUser[0].id,
                 nombre: newUser[0].nombre,
                 apellido: newUser[0].apellido,
-                email: newUser[0].nombre, // Mapear nombre a email para frontend
-                telefono: '', // No existe en tu esquema
+                email: newUser[0].nombre,
+                telefono: '',
                 fecha_registro: new Date().toISOString(),
+                rol: newUser[0].rol,
                 rol_nombre: newUser[0].rol_nombre || 'Usuario'
             }
         });
         
     } catch (error) {
         console.error('💥 Error creando usuario:', error);
-        
-        // Log detallado del error
         console.error('Error details:', {
             message: error.message,
             code: error.code,
@@ -259,19 +401,25 @@ app.post('/api/usuarios', async (req, res) => {
         
         res.status(500).json({ 
             error: 'Error creando usuario',
-            details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno'
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno del servidor'
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
+
 app.put('/api/usuarios/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         const { nombre, apellido, clave, rol } = req.body;
         
         console.log(`✏️ Actualizando usuario ${id}:`, req.body);
         
+        connection = await pool.getConnection();
+        
         // Verificar que el usuario existe
-        const [userExists] = await pool.execute('SELECT id FROM usuario WHERE id = ?', [id]);
+        const [userExists] = await connection.execute('SELECT id FROM usuario WHERE id = ?', [id]);
         if (userExists.length === 0) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
@@ -284,7 +432,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
         }
         
         // Verificar que el rol existe
-        const [rolExists] = await pool.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
+        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
         if (rolExists.length === 0) {
             return res.status(400).json({ error: 'El rol especificado no existe' });
         }
@@ -312,12 +460,12 @@ app.put('/api/usuarios/:id', async (req, res) => {
         }
         
         // Ejecutar actualización
-        await pool.execute(updateQuery, updateParams);
+        await connection.execute(updateQuery, updateParams);
         
         console.log('✅ Usuario actualizado:', id);
         
         // Obtener el usuario actualizado para devolverlo
-        const [updatedUser] = await pool.execute(`
+        const [updatedUser] = await connection.execute(`
             SELECT u.id, u.nombre, u.apellido, u.rol,
                    r.descripcion as rol_nombre
             FROM usuario u
@@ -331,8 +479,8 @@ app.put('/api/usuarios/:id', async (req, res) => {
                 id: updatedUser[0].id,
                 nombre: updatedUser[0].nombre,
                 apellido: updatedUser[0].apellido,
-                email: updatedUser[0].nombre, // Mapear nombre a email para frontend
-                telefono: '', // No existe en tu esquema
+                email: updatedUser[0].nombre,
+                telefono: '',
                 fecha_registro: new Date().toISOString(),
                 rol_nombre: updatedUser[0].rol_nombre || 'Usuario',
                 rol: updatedUser[0].rol
@@ -345,18 +493,22 @@ app.put('/api/usuarios/:id', async (req, res) => {
             error: 'Error actualizando usuario',
             details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno'
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// DELETE - Eliminar usuario
 app.delete('/api/usuarios/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`🗑️ Eliminando usuario ${id}`);
         
+        connection = await pool.getConnection();
+        
         // Verificar que el usuario existe
-        const [userExists] = await pool.execute('SELECT id, nombre, apellido FROM usuario WHERE id = ?', [id]);
+        const [userExists] = await connection.execute('SELECT id, nombre, apellido FROM usuario WHERE id = ?', [id]);
         if (userExists.length === 0) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
@@ -364,7 +516,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         const usuario = userExists[0];
         
         // Verificar si el usuario tiene colmenas asociadas
-        const [colmenasAsociadas] = await pool.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ?', [id]);
+        const [colmenasAsociadas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ?', [id]);
         
         if (colmenasAsociadas[0].count > 0) {
             return res.status(400).json({ 
@@ -373,7 +525,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         }
         
         // Eliminar usuario
-        await pool.execute('DELETE FROM usuario WHERE id = ?', [id]);
+        await connection.execute('DELETE FROM usuario WHERE id = ?', [id]);
         
         console.log('✅ Usuario eliminado:', id);
         res.json({ 
@@ -395,17 +547,21 @@ app.delete('/api/usuarios/:id', async (req, res) => {
             error: 'Error eliminando usuario',
             details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno'
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// GET - Obtener un usuario específico (opcional, útil para debug)
 app.get('/api/usuarios/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`🔍 Obteniendo usuario ${id}`);
         
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
             SELECT u.id, u.nombre, u.apellido, u.clave, u.rol,
                    r.descripcion as rol_nombre
             FROM usuario u 
@@ -421,9 +577,9 @@ app.get('/api/usuarios/:id', async (req, res) => {
             id: rows[0].id,
             nombre: rows[0].nombre,
             apellido: rows[0].apellido,
-            email: rows[0].nombre, // Usar nombre como email temporalmente
-            telefono: '', // No existe en tu esquema
-            fecha_registro: new Date().toISOString(), // Temporalmente
+            email: rows[0].nombre,
+            telefono: '',
+            fecha_registro: new Date().toISOString(),
             rol_nombre: rows[0].rol_nombre || 'Usuario',
             rol: rows[0].rol
         };
@@ -434,14 +590,9 @@ app.get('/api/usuarios/:id', async (req, res) => {
     } catch (error) {
         console.error('💥 Error obteniendo usuario:', error);
         res.status(500).json({ error: 'Error obteniendo usuario' });
+    } finally {
+        if (connection) connection.release();
     }
-});
-// TAMBIÉN AGREGA este endpoint para debug de logs en tiempo real:
-app.get('/api/debug/logs', (req, res) => {
-    res.json({
-        message: 'Endpoint para debug. Revisa los logs del servidor.',
-        timestamp: new Date().toISOString()
-    });
 });
 
 // =============================================
@@ -449,97 +600,76 @@ app.get('/api/debug/logs', (req, res) => {
 // =============================================
 
 app.get('/api/colmenas', async (req, res) => {
+    let connection;
     try {
         console.log('🏠 Obteniendo colmenas...');
         
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        
+        // Verificar primero si las tablas existen
+        const [colmenas] = await connection.execute(`
             SELECT c.id, c.descripcion, c.dueno,
-                   u.nombre as dueno_nombre, u.apellido as dueno_apellido,
-                   cu.latitud, cu.longitud, cu.comuna, cu.descripcion as ubicacion_descripcion
+                   u.nombre as dueno_nombre, u.apellido as dueno_apellido
             FROM colmena c
             LEFT JOIN usuario u ON c.dueno = u.id
-            LEFT JOIN colmena_ubicacion cu ON c.id = cu.colmena_id
             ORDER BY c.id ASC
         `);
         
-        // Formatear para compatibilidad con frontend
-        const colmenas = rows.map(colmena => ({
-            id: colmena.id,
-            nombre: `Colmena #${colmena.id}`, // Generar nombre basado en ID
-            tipo: 'Langstroth', // Valor por defecto
-            descripcion: colmena.descripcion,
-            dueno: colmena.dueno,
-            dueno_nombre: colmena.dueno_nombre,
-            dueno_apellido: colmena.dueno_apellido,
-            apiario_id: null, // No existe en tu esquema
-            apiario_nombre: colmena.comuna, // Usar comuna como "apiario"
-            fecha_instalacion: new Date().toISOString(), // Temporalmente
-            activa: 1, // Asumir que están activas
-            latitud: colmena.latitud,
-            longitud: colmena.longitud,
-            ubicacion: colmena.ubicacion_descripcion
-        }));
+        // Intentar obtener ubicaciones, pero manejar error si la tabla no existe
+        let ubicacionesMap = {};
+        try {
+            const [ubicaciones] = await connection.execute(`
+                SELECT colmena_id, latitud, longitud, comuna, descripcion as ubicacion_descripcion
+                FROM colmena_ubicacion
+            `);
+            
+            ubicaciones.forEach(ub => {
+                ubicacionesMap[ub.colmena_id] = ub;
+            });
+        } catch (ubicacionError) {
+            console.log('⚠️ Tabla colmena_ubicacion no encontrada, usando valores por defecto');
+        }
         
-        console.log('✅ Colmenas obtenidas:', colmenas.length);
-        res.json(colmenas);
+        // Formatear para compatibilidad con frontend
+        const colmenasFormateadas = colmenas.map(colmena => {
+            const ubicacion = ubicacionesMap[colmena.id] || {};
+            
+            return {
+                id: colmena.id,
+                nombre: `Colmena #${colmena.id}`,
+                tipo: 'Langstroth',
+                descripcion: colmena.descripcion,
+                dueno: colmena.dueno,
+                dueno_nombre: colmena.dueno_nombre,
+                dueno_apellido: colmena.dueno_apellido,
+                apiario_id: null,
+                apiario_nombre: ubicacion.comuna || 'Sin ubicación',
+                fecha_instalacion: new Date().toISOString(),
+                activa: 1,
+                latitud: ubicacion.latitud || null,
+                longitud: ubicacion.longitud || null,
+                ubicacion: ubicacion.ubicacion_descripcion || null,
+                comuna: ubicacion.comuna || null
+            };
+        });
+        
+        console.log('✅ Colmenas obtenidas:', colmenasFormateadas.length);
+        res.json(colmenasFormateadas);
+        
     } catch (error) {
         console.error('💥 Error obteniendo colmenas:', error);
-        res.status(500).json({ error: 'Error obteniendo colmenas' });
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo colmenas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// ASEGÚRATE DE QUE TIENES ESTE ENDPOINT EN TU server.js
-// (debe estar ANTES de los endpoints con parámetros como /:id)
-
-// =============================================
-// RUTAS PARA COLMENAS - ORDEN IMPORTANTE
-// =============================================
-
-// GET - Obtener todas las colmenas (YA LO TIENES)
-app.get('/api/colmenas', async (req, res) => {
-    try {
-        console.log('🏠 Obteniendo colmenas...');
-        
-        const [rows] = await pool.execute(`
-            SELECT c.id, c.descripcion, c.dueno,
-                   u.nombre as dueno_nombre, u.apellido as dueno_apellido,
-                   cu.latitud, cu.longitud, cu.comuna, cu.descripcion as ubicacion_descripcion
-            FROM colmena c
-            LEFT JOIN usuario u ON c.dueno = u.id
-            LEFT JOIN colmena_ubicacion cu ON c.id = cu.colmena_id
-            ORDER BY c.id ASC
-        `);
-        
-        // Formatear para compatibilidad con frontend
-        const colmenas = rows.map(colmena => ({
-            id: colmena.id,
-            nombre: `Colmena #${colmena.id}`, // Generar nombre basado en ID
-            tipo: 'Langstroth', // Valor por defecto
-            descripcion: colmena.descripcion,
-            dueno: colmena.dueno,
-            dueno_nombre: colmena.dueno_nombre,
-            dueno_apellido: colmena.dueno_apellido,
-            apiario_id: null, // No existe en tu esquema
-            apiario_nombre: colmena.comuna, // Usar comuna como "apiario"
-            fecha_instalacion: new Date().toISOString(), // Temporalmente
-            activa: 1, // Asumir que están activas
-            latitud: colmena.latitud,
-            longitud: colmena.longitud,
-            ubicacion: colmena.ubicacion_descripcion,
-            comuna: colmena.comuna,
-            ubicacion_descripcion: colmena.ubicacion_descripcion
-        }));
-        
-        console.log('✅ Colmenas obtenidas:', colmenas.length);
-        res.json(colmenas);
-    } catch (error) {
-        console.error('💥 Error obteniendo colmenas:', error);
-        res.status(500).json({ error: 'Error obteniendo colmenas' });
-    }
-});
-
-// POST - Crear nueva colmena (ESTE ES EL QUE FALTA)
 app.post('/api/colmenas', async (req, res) => {
+    let connection;
     try {
         console.log('➕ Creando nueva colmena con datos:', req.body);
         
@@ -552,14 +682,16 @@ app.post('/api/colmenas', async (req, res) => {
             });
         }
         
+        connection = await pool.getConnection();
+        
         // Verificar que el dueño existe
-        const [duenoExists] = await pool.execute('SELECT id FROM usuario WHERE id = ?', [dueno]);
+        const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ?', [dueno]);
         if (duenoExists.length === 0) {
             return res.status(400).json({ error: 'El usuario dueño no existe' });
         }
         
         // Insertar nueva colmena
-        const [result] = await pool.execute(`
+        const [result] = await connection.execute(`
             INSERT INTO colmena (descripcion, dueno) 
             VALUES (?, ?)
         `, [descripcion.trim(), parseInt(dueno)]);
@@ -582,19 +714,22 @@ app.post('/api/colmenas', async (req, res) => {
             error: 'Error creando colmena',
             details: error.message 
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// IMPORTANTE: Los endpoints con parámetros (:id) deben ir DESPUÉS
-// GET - Obtener detalle completo de una colmena
 app.get('/api/colmenas/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`🔍 Obteniendo detalle de colmena ${id}`);
         
+        connection = await pool.getConnection();
+        
         // Obtener información básica de la colmena
-        const [colmenaData] = await pool.execute(`
+        const [colmenaData] = await connection.execute(`
             SELECT c.id, c.descripcion, c.dueno,
                    u.nombre as dueno_nombre, u.apellido as dueno_apellido
             FROM colmena c
@@ -606,24 +741,36 @@ app.get('/api/colmenas/:id', async (req, res) => {
             return res.status(404).json({ error: 'Colmena no encontrada' });
         }
         
-        // Obtener ubicación
-        const [ubicacionData] = await pool.execute(`
-            SELECT latitud, longitud, descripcion as ubicacion_descripcion, comuna
-            FROM colmena_ubicacion 
-            WHERE colmena_id = ?
-            ORDER BY fecha DESC
-            LIMIT 1
-        `, [id]);
+        // Obtener ubicación (con manejo de errores)
+        let ubicacionData = [];
+        try {
+            const [ubicacion] = await connection.execute(`
+                SELECT latitud, longitud, descripcion as ubicacion_descripcion, comuna
+                FROM colmena_ubicacion 
+                WHERE colmena_id = ?
+                ORDER BY fecha DESC
+                LIMIT 1
+            `, [id]);
+            ubicacionData = ubicacion;
+        } catch (ubicacionError) {
+            console.log('⚠️ Tabla colmena_ubicacion no encontrada');
+        }
         
-        // Obtener nodos asociados
-        const [nodosData] = await pool.execute(`
-            SELECT n.id, n.descripcion, n.tipo,
-                   nt.descripcion as tipo_descripcion
-            FROM nodo_colmena nc
-            JOIN nodo n ON nc.nodo_id = n.id
-            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
-            WHERE nc.colmena_id = ?
-        `, [id]);
+        // Obtener nodos asociados (con manejo de errores)
+        let nodosData = [];
+        try {
+            const [nodos] = await connection.execute(`
+                SELECT n.id, n.descripcion, n.tipo,
+                       nt.descripcion as tipo_descripcion
+                FROM nodo_colmena nc
+                JOIN nodo n ON nc.nodo_id = n.id
+                LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+                WHERE nc.colmena_id = ?
+            `, [id]);
+            nodosData = nodos;
+        } catch (nodosError) {
+            console.log('⚠️ Tablas de nodos no encontradas');
+        }
         
         const colmenaCompleta = {
             ...colmenaData[0],
@@ -637,25 +784,29 @@ app.get('/api/colmenas/:id', async (req, res) => {
     } catch (error) {
         console.error('💥 Error obteniendo detalle de colmena:', error);
         res.status(500).json({ error: 'Error obteniendo detalle de colmena' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// PUT - Actualizar colmena
 app.put('/api/colmenas/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         const { descripcion, dueno } = req.body;
         
         console.log(`✏️ Actualizando colmena ${id}:`, req.body);
         
+        connection = await pool.getConnection();
+        
         // Verificar que la colmena existe
-        const [colmenaExists] = await pool.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
         if (colmenaExists.length === 0) {
             return res.status(404).json({ error: 'Colmena no encontrada' });
         }
         
         // Actualizar colmena
-        await pool.execute(`
+        await connection.execute(`
             UPDATE colmena 
             SET descripcion = ?, dueno = ?
             WHERE id = ?
@@ -670,26 +821,34 @@ app.put('/api/colmenas/:id', async (req, res) => {
     } catch (error) {
         console.error('💥 Error actualizando colmena:', error);
         res.status(500).json({ error: 'Error actualizando colmena' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// DELETE - Eliminar colmena
 app.delete('/api/colmenas/:id', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`🗑️ Eliminando colmena ${id}`);
         
+        connection = await pool.getConnection();
+        
         // Verificar que la colmena existe
-        const [colmenaExists] = await pool.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
         if (colmenaExists.length === 0) {
             return res.status(404).json({ error: 'Colmena no encontrada' });
         }
         
-        // Eliminar en orden (por las foreign keys)
-        await pool.execute('DELETE FROM nodo_colmena WHERE colmena_id = ?', [id]);
-        await pool.execute('DELETE FROM colmena_ubicacion WHERE colmena_id = ?', [id]);
-        await pool.execute('DELETE FROM colmena WHERE id = ?', [id]);
+        // Eliminar en orden (por las foreign keys) - con manejo de errores
+        try {
+            await connection.execute('DELETE FROM colmena_ubicacion WHERE colmena_id = ?', [id]);
+        } catch (e) {
+            console.log('⚠️ Tabla colmena_ubicacion no encontrada');
+        }
+        
+        await connection.execute('DELETE FROM colmena WHERE id = ?', [id]);
         
         console.log('✅ Colmena eliminada:', id);
         res.json({ 
@@ -700,17 +859,23 @@ app.delete('/api/colmenas/:id', async (req, res) => {
     } catch (error) {
         console.error('💥 Error eliminando colmena:', error);
         res.status(500).json({ error: 'Error eliminando colmena' });
+    } finally {
+        if (connection) connection.release();
     }
 });
+
 app.post('/api/colmenas/:id/ubicaciones', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         const { latitud, longitud, descripcion, comuna } = req.body;
         
         console.log(`📍 Agregando ubicación a colmena ${id}:`, req.body);
         
+        connection = await pool.getConnection();
+        
         // Verificar que la colmena existe
-        const [colmenaExists] = await pool.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
         if (colmenaExists.length === 0) {
             return res.status(404).json({ error: 'Colmena no encontrada' });
         }
@@ -720,35 +885,45 @@ app.post('/api/colmenas/:id/ubicaciones', async (req, res) => {
             return res.status(400).json({ error: 'Latitud y longitud son requeridos' });
         }
         
-        // Verificar si ya existe una ubicación para esta colmena
-        const [existingLocation] = await pool.execute(
-            'SELECT id FROM colmena_ubicacion WHERE colmena_id = ?', 
-            [id]
-        );
-        
-        if (existingLocation.length > 0) {
-            // Actualizar ubicación existente
-            await pool.execute(`
-                UPDATE colmena_ubicacion 
-                SET latitud = ?, longitud = ?, descripcion = ?, comuna = ?, fecha = CURRENT_TIMESTAMP
-                WHERE colmena_id = ?
-            `, [latitud, longitud, descripcion || null, comuna || null, id]);
+        // Verificar si existe la tabla colmena_ubicacion
+        try {
+            // Verificar si ya existe una ubicación para esta colmena
+            const [existingLocation] = await connection.execute(
+                'SELECT id FROM colmena_ubicacion WHERE colmena_id = ?', 
+                [id]
+            );
             
-            console.log('✅ Ubicación actualizada para colmena:', id);
-        } else {
-            // Crear nueva ubicación
-            await pool.execute(`
-                INSERT INTO colmena_ubicacion (colmena_id, latitud, longitud, descripcion, comuna) 
-                VALUES (?, ?, ?, ?, ?)
-            `, [id, latitud, longitud, descripcion || null, comuna || null]);
+            if (existingLocation.length > 0) {
+                // Actualizar ubicación existente
+                await connection.execute(`
+                    UPDATE colmena_ubicacion 
+                    SET latitud = ?, longitud = ?, descripcion = ?, comuna = ?, fecha = CURRENT_TIMESTAMP
+                    WHERE colmena_id = ?
+                `, [latitud, longitud, descripcion || null, comuna || null, id]);
+                
+                console.log('✅ Ubicación actualizada para colmena:', id);
+            } else {
+                // Crear nueva ubicación
+                await connection.execute(`
+                    INSERT INTO colmena_ubicacion (colmena_id, latitud, longitud, descripcion, comuna) 
+                    VALUES (?, ?, ?, ?, ?)
+                `, [id, latitud, longitud, descripcion || null, comuna || null]);
+                
+                console.log('✅ Nueva ubicación creada para colmena:', id);
+            }
             
-            console.log('✅ Nueva ubicación creada para colmena:', id);
+            res.json({ 
+                message: 'Ubicación agregada/actualizada correctamente',
+                colmena_id: id
+            });
+            
+        } catch (tableError) {
+            console.log('⚠️ Tabla colmena_ubicacion no existe, creando respuesta sin ubicación');
+            res.json({ 
+                message: 'Funcionalidad de ubicaciones no disponible en la base de datos actual',
+                colmena_id: id
+            });
         }
-        
-        res.json({ 
-            message: 'Ubicación agregada/actualizada correctamente',
-            colmena_id: id
-        });
         
     } catch (error) {
         console.error('💥 Error agregando ubicación:', error);
@@ -756,36 +931,46 @@ app.post('/api/colmenas/:id/ubicaciones', async (req, res) => {
             error: 'Error agregando ubicación',
             details: error.message 
         });
+    } finally {
+        if (connection) connection.release();
     }
-}); // ✅ CERRAR CORRECTAMENTE AQUÍ
+});
 
-// GET - Obtener nodos asociados a una colmena específica
 app.get('/api/colmenas/:id/nodos', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`🔌 Obteniendo nodos para colmena ${id}`);
         
+        connection = await pool.getConnection();
+        
         // Verificar que la colmena existe
-        const [colmenaExists] = await pool.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
         if (colmenaExists.length === 0) {
             return res.status(404).json({ error: 'Colmena no encontrada' });
         }
         
-        // Obtener nodos asociados a esta colmena
-        const [nodos] = await pool.execute(`
-            SELECT n.id, n.descripcion, n.tipo,
-                   nt.descripcion as tipo_descripcion,
-                   nc.fecha as fecha_asociacion
-            FROM nodo_colmena nc
-            JOIN nodo n ON nc.nodo_id = n.id
-            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
-            WHERE nc.colmena_id = ?
-            ORDER BY nc.fecha DESC
-        `, [id]);
-        
-        console.log(`✅ Nodos encontrados para colmena ${id}:`, nodos.length);
-        res.json(nodos);
+        // Intentar obtener nodos (con manejo de errores si las tablas no existen)
+        try {
+            const [nodos] = await connection.execute(`
+                SELECT n.id, n.descripcion, n.tipo,
+                       nt.descripcion as tipo_descripcion,
+                       nc.fecha as fecha_asociacion
+                FROM nodo_colmena nc
+                JOIN nodo n ON nc.nodo_id = n.id
+                LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+                WHERE nc.colmena_id = ?
+                ORDER BY nc.fecha DESC
+            `, [id]);
+            
+            console.log(`✅ Nodos encontrados para colmena ${id}:`, nodos.length);
+            res.json(nodos);
+            
+        } catch (nodosError) {
+            console.log('⚠️ Tablas de nodos no encontradas, devolviendo array vacío');
+            res.json([]);
+        }
         
     } catch (error) {
         console.error('💥 Error obteniendo nodos de colmena:', error);
@@ -793,25 +978,35 @@ app.get('/api/colmenas/:id/nodos', async (req, res) => {
             error: 'Error obteniendo nodos de la colmena',
             details: error.message 
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// GET - Obtener ubicaciones específicas de una colmena
 app.get('/api/colmenas/:id/ubicaciones', async (req, res) => {
+    let connection;
     try {
         const { id } = req.params;
         
         console.log(`📍 Obteniendo ubicaciones para colmena ${id}`);
         
-        const [ubicaciones] = await pool.execute(`
-            SELECT id, latitud, longitud, descripcion, comuna, fecha
-            FROM colmena_ubicacion 
-            WHERE colmena_id = ?
-            ORDER BY fecha DESC
-        `, [id]);
+        connection = await pool.getConnection();
         
-        console.log(`✅ Ubicaciones encontradas para colmena ${id}:`, ubicaciones.length);
-        res.json(ubicaciones);
+        try {
+            const [ubicaciones] = await connection.execute(`
+                SELECT id, latitud, longitud, descripcion, comuna, fecha
+                FROM colmena_ubicacion 
+                WHERE colmena_id = ?
+                ORDER BY fecha DESC
+            `, [id]);
+            
+            console.log(`✅ Ubicaciones encontradas para colmena ${id}:`, ubicaciones.length);
+            res.json(ubicaciones);
+            
+        } catch (ubicacionError) {
+            console.log('⚠️ Tabla colmena_ubicacion no encontrada, devolviendo array vacío');
+            res.json([]);
+        }
         
     } catch (error) {
         console.error('💥 Error obteniendo ubicaciones:', error);
@@ -819,195 +1014,95 @@ app.get('/api/colmenas/:id/ubicaciones', async (req, res) => {
             error: 'Error obteniendo ubicaciones',
             details: error.message 
         });
+    } finally {
+        if (connection) connection.release();
     }
 });
+
 // =============================================
 // RUTAS PARA NODOS
 // =============================================
 
 app.get('/api/nodos', async (req, res) => {
+    let connection;
     try {
         console.log('🔌 Obteniendo nodos...');
         
-        const [rows] = await pool.execute(`
-            SELECT n.id, n.descripcion, n.tipo,
-                   nt.descripcion as tipo_descripcion,
-                   nu.latitud, nu.longitud, nu.comuna
-            FROM nodo n
-            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
-            LEFT JOIN nodo_ubicacion nu ON n.id = nu.nodo_id
-            ORDER BY n.id ASC
-        `);
+        connection = await pool.getConnection();
         
-        // Formatear para frontend
-        const nodos = rows.map(nodo => ({
-            id: nodo.id,
-            identificador: `Nodo ${nodo.id}`,
-            descripcion: nodo.descripcion,
-            tipo: nodo.tipo_descripcion,
-            latitud: nodo.latitud,
-            longitud: nodo.longitud,
-            fecha_instalacion: new Date().toISOString(),
-            activo: true
-        }));
+        try {
+            const [rows] = await connection.execute(`
+                SELECT n.id, n.descripcion, n.tipo,
+                       nt.descripcion as tipo_descripcion,
+                       nu.latitud, nu.longitud, nu.comuna
+                FROM nodo n
+                LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+                LEFT JOIN nodo_ubicacion nu ON n.id = nu.nodo_id
+                ORDER BY n.id ASC
+            `);
+            
+            // Formatear para frontend
+            const nodos = rows.map(nodo => ({
+                id: nodo.id,
+                identificador: `Nodo ${nodo.id}`,
+                descripcion: nodo.descripcion,
+                tipo: nodo.tipo_descripcion,
+                latitud: nodo.latitud,
+                longitud: nodo.longitud,
+                fecha_instalacion: new Date().toISOString(),
+                activo: true
+            }));
+            
+            console.log('✅ Nodos obtenidos:', nodos.length);
+            res.json(nodos);
+            
+        } catch (nodosError) {
+            console.log('⚠️ Tablas de nodos no encontradas, devolviendo array vacío');
+            res.json([]);
+        }
         
-        console.log('✅ Nodos obtenidos:', nodos.length);
-        res.json(nodos);
     } catch (error) {
         console.error('💥 Error obteniendo nodos:', error);
         res.status(500).json({ error: 'Error obteniendo nodos' });
+    } finally {
+        if (connection) connection.release();
     }
 });
+
 app.get('/api/nodo-tipos', async (req, res) => {
+    let connection;
     try {
         console.log('🔧 Obteniendo tipos de nodos...');
         
-        const [rows] = await pool.execute(`
-            SELECT tipo, descripcion 
-            FROM nodo_tipo 
-            ORDER BY tipo ASC
-        `);
+        connection = await pool.getConnection();
         
-        // Formatear para compatibilidad con frontend
-        const nodoTipos = rows.map(tipo => ({
-            id: tipo.tipo,           // Para compatibilidad
-            tipo: tipo.tipo,         // ID original
-            descripcion: tipo.descripcion
-        }));
+        try {
+            const [rows] = await connection.execute(`
+                SELECT tipo, descripcion 
+                FROM nodo_tipo 
+                ORDER BY tipo ASC
+            `);
+            
+            // Formatear para compatibilidad con frontend
+            const nodoTipos = rows.map(tipo => ({
+                id: tipo.tipo,           // Para compatibilidad
+                tipo: tipo.tipo,         // ID original
+                descripcion: tipo.descripcion
+            }));
+            
+            console.log('✅ Tipos de nodos obtenidos:', nodoTipos.length);
+            res.json(nodoTipos);
+            
+        } catch (tiposError) {
+            console.log('⚠️ Tabla nodo_tipo no encontrada, devolviendo array vacío');
+            res.json([]);
+        }
         
-        console.log('✅ Tipos de nodos obtenidos:', nodoTipos.length);
-        res.json(nodoTipos);
     } catch (error) {
         console.error('💥 Error obteniendo tipos de nodos:', error);
         res.status(500).json({ error: 'Error obteniendo tipos de nodos' });
-    }
-});
-
-// POST - Crear nuevo tipo de nodo (opcional)
-app.post('/api/nodo-tipos', async (req, res) => {
-    try {
-        const { descripcion } = req.body;
-        
-        console.log('➕ Creando nuevo tipo de nodo:', { descripcion });
-        
-        if (!descripcion || !descripcion.trim()) {
-            return res.status(400).json({ 
-                error: 'La descripción es requerida' 
-            });
-        }
-        
-        // Insertar nuevo tipo de nodo
-        const [result] = await pool.execute(`
-            INSERT INTO nodo_tipo (descripcion) 
-            VALUES (?)
-        `, [descripcion.trim()]);
-        
-        console.log('✅ Tipo de nodo creado exitosamente:', result.insertId);
-        
-        res.status(201).json({ 
-            id: result.insertId,
-            tipo: result.insertId,
-            descripcion: descripcion.trim(),
-            message: 'Tipo de nodo creado exitosamente'
-        });
-        
-    } catch (error) {
-        console.error('💥 Error creando tipo de nodo:', error);
-        res.status(500).json({ 
-            error: 'Error creando tipo de nodo',
-            details: error.message 
-        });
-    }
-});
-
-// PUT - Actualizar tipo de nodo (opcional)
-app.put('/api/nodo-tipos/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { descripcion } = req.body;
-        
-        console.log(`✏️ Actualizando tipo de nodo ${id}:`, { descripcion });
-        
-        // Verificar que el tipo de nodo existe
-        const [tipoExists] = await pool.execute('SELECT tipo FROM nodo_tipo WHERE tipo = ?', [id]);
-        if (tipoExists.length === 0) {
-            return res.status(404).json({ error: 'Tipo de nodo no encontrado' });
-        }
-        
-        if (!descripcion || !descripcion.trim()) {
-            return res.status(400).json({ 
-                error: 'La descripción es requerida' 
-            });
-        }
-        
-        // Actualizar tipo de nodo
-        await pool.execute(`
-            UPDATE nodo_tipo 
-            SET descripcion = ?
-            WHERE tipo = ?
-        `, [descripcion.trim(), id]);
-        
-        console.log('✅ Tipo de nodo actualizado:', id);
-        res.json({ 
-            message: 'Tipo de nodo actualizado correctamente',
-            id: parseInt(id),
-            descripcion: descripcion.trim()
-        });
-        
-    } catch (error) {
-        console.error('💥 Error actualizando tipo de nodo:', error);
-        res.status(500).json({ 
-            error: 'Error actualizando tipo de nodo',
-            details: error.message 
-        });
-    }
-});
-
-// DELETE - Eliminar tipo de nodo (opcional)
-app.delete('/api/nodo-tipos/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        console.log(`🗑️ Eliminando tipo de nodo ${id}`);
-        
-        // Verificar que el tipo de nodo existe
-        const [tipoExists] = await pool.execute('SELECT tipo, descripcion FROM nodo_tipo WHERE tipo = ?', [id]);
-        if (tipoExists.length === 0) {
-            return res.status(404).json({ error: 'Tipo de nodo no encontrado' });
-        }
-        
-        // Verificar si hay nodos que usan este tipo
-        const [nodosAsociados] = await pool.execute('SELECT COUNT(*) as count FROM nodo WHERE tipo = ?', [id]);
-        
-        if (nodosAsociados[0].count > 0) {
-            return res.status(400).json({ 
-                error: `No se puede eliminar el tipo de nodo porque hay ${nodosAsociados[0].count} nodo(s) que lo utilizan.`
-            });
-        }
-        
-        // Eliminar tipo de nodo
-        await pool.execute('DELETE FROM nodo_tipo WHERE tipo = ?', [id]);
-        
-        console.log('✅ Tipo de nodo eliminado:', id);
-        res.json({ 
-            message: `Tipo de nodo "${tipoExists[0].descripcion}" eliminado correctamente`,
-            id: parseInt(id)
-        });
-        
-    } catch (error) {
-        console.error('💥 Error eliminando tipo de nodo:', error);
-        
-        // Error específico para foreign key constraint
-        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
-            return res.status(400).json({ 
-                error: 'No se puede eliminar el tipo de nodo porque tiene nodos asociados'
-            });
-        }
-        
-        res.status(500).json({ 
-            error: 'Error eliminando tipo de nodo',
-            details: error.message 
-        });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
@@ -1016,12 +1111,28 @@ app.delete('/api/nodo-tipos/:id', async (req, res) => {
 // =============================================
 
 app.get('/api/mensajes/recientes', async (req, res) => {
+    let connection;
     try {
         const { hours = 24 } = req.query;
         
         console.log('💬 Obteniendo mensajes recientes...');
         
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        
+        // Verificar si la tabla mensaje existe
+        const [tablesCheck] = await connection.execute(`
+            SELECT TABLE_NAME 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mensaje'
+        `);
+        
+        if (tablesCheck.length === 0) {
+            console.log('⚠️ Tabla mensaje no existe, devolviendo array vacío');
+            res.json([]);
+            return;
+        }
+        
+        const [rows] = await connection.execute(`
             SELECT m.id, m.nodo_id, m.topico, m.payload, m.fecha,
                    n.descripcion as nodo_descripcion
             FROM mensaje m
@@ -1035,7 +1146,7 @@ app.get('/api/mensajes/recientes', async (req, res) => {
         const mensajes = rows.map(mensaje => ({
             id: mensaje.id,
             nodo_id: mensaje.nodo_id,
-            nodo_identificador: mensaje.nodo_descripcion,
+            nodo_identificador: mensaje.nodo_descripcion || `Nodo ${mensaje.nodo_id}`,
             topico: mensaje.topico,
             payload: mensaje.payload,
             fecha: mensaje.fecha
@@ -1043,40 +1154,64 @@ app.get('/api/mensajes/recientes', async (req, res) => {
         
         console.log('✅ Mensajes obtenidos:', mensajes.length);
         res.json(mensajes);
+        
     } catch (error) {
         console.error('💥 Error obteniendo mensajes:', error);
-        res.status(500).json({ error: 'Error obteniendo mensajes' });
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo mensajes',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
     }
 });
-
 
 // =============================================
 // RUTAS PARA DASHBOARD
 // =============================================
 
 app.get('/api/dashboard/stats', async (req, res) => {
+    let connection;
     try {
         console.log('📊 Obteniendo estadísticas del dashboard...');
         
-        const [usuarios] = await pool.execute('SELECT COUNT(*) as count FROM usuario');
-        const [colmenas] = await pool.execute('SELECT COUNT(*) as count FROM colmena');
-        const [mensajesHoy] = await pool.execute(`
-            SELECT COUNT(*) as count FROM mensaje 
-            WHERE DATE(fecha) = CURDATE()
-        `);
+        connection = await pool.getConnection();
+        
+        const [usuarios] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
+        const [colmenas] = await connection.execute('SELECT COUNT(*) as count FROM colmena');
+        
+        // Verificar si existe la tabla mensaje antes de consultarla
+        let mensajesHoy = [{ count: 0 }];
+        try {
+            const [mensajes] = await connection.execute(`
+                SELECT COUNT(*) as count FROM mensaje 
+                WHERE DATE(fecha) = CURDATE()
+            `);
+            mensajesHoy = mensajes;
+        } catch (mensajeError) {
+            console.log('⚠️ Tabla mensaje no encontrada, usando valor por defecto');
+        }
         
         const stats = {
             totalColmenas: colmenas[0].count,
             totalUsuarios: usuarios[0].count,
             mensajesHoy: mensajesHoy[0].count,
-            colmenasActivas: colmenas[0].count // Asumir que todas están activas
+            colmenasActivas: colmenas[0].count
         };
         
         console.log('✅ Estadísticas obtenidas:', stats);
         res.json(stats);
+        
     } catch (error) {
         console.error('💥 Error obteniendo estadísticas:', error);
-        res.status(500).json({ error: 'Error obteniendo estadísticas' });
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo estadísticas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
@@ -1085,10 +1220,13 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // =============================================
 
 app.get('/api/roles', async (req, res) => {
+    let connection;
     try {
         console.log('👥 Obteniendo roles...');
         
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
             SELECT rol as id, descripcion 
             FROM rol 
             ORDER BY rol
@@ -1099,6 +1237,8 @@ app.get('/api/roles', async (req, res) => {
     } catch (error) {
         console.error('💥 Error obteniendo roles:', error);
         res.status(500).json({ error: 'Error obteniendo roles' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
@@ -1137,34 +1277,44 @@ app.post('/api/revisiones', async (req, res) => {
 // =============================================
 
 app.get('/api/select/usuarios', async (req, res) => {
+    let connection;
     try {
-        const [rows] = await pool.execute('SELECT id, nombre, apellido FROM usuario ORDER BY nombre');
+        connection = await pool.getConnection();
+        const [rows] = await connection.execute('SELECT id, nombre, apellido FROM usuario ORDER BY nombre');
         res.json(rows);
     } catch (error) {
         console.error('Error obteniendo usuarios para select:', error);
         res.status(500).json({ error: 'Error obteniendo usuarios' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
 app.get('/api/colmenas/activas', async (req, res) => {
+    let connection;
     try {
-        const [rows] = await pool.execute(`
+        connection = await pool.getConnection();
+        const [rows] = await connection.execute(`
             SELECT id, CONCAT('Colmena #', id) as nombre FROM colmena ORDER BY id
         `);
         res.json(rows);
     } catch (error) {
         console.error('Error obteniendo colmenas activas:', error);
         res.status(500).json({ error: 'Error obteniendo colmenas activas' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
 // =============================================
-// RUTA DE DEBUG (TEMPORAL)
+// RUTA DE DEBUG ADICIONAL
 // =============================================
 
 app.get('/api/debug/estructura', async (req, res) => {
+    let connection;
     try {
-        const [tables] = await pool.execute('SHOW TABLES');
+        connection = await pool.getConnection();
+        const [tables] = await connection.execute('SHOW TABLES');
         
         let estructura = { tablas: tables };
         
@@ -1172,7 +1322,7 @@ app.get('/api/debug/estructura', async (req, res) => {
         for (const table of tables) {
             const tableName = table[Object.keys(table)[0]];
             try {
-                const [columns] = await pool.execute(`DESCRIBE ${tableName}`);
+                const [columns] = await connection.execute(`DESCRIBE ${tableName}`);
                 estructura[tableName] = columns;
             } catch (e) {
                 estructura[`${tableName}_error`] = e.message;
@@ -1182,7 +1332,16 @@ app.get('/api/debug/estructura', async (req, res) => {
         res.json(estructura);
     } catch (error) {
         res.status(500).json({ error: error.message });
+    } finally {
+        if (connection) connection.release();
     }
+});
+
+app.get('/api/debug/logs', (req, res) => {
+    res.json({
+        message: 'Endpoint para debug. Revisa los logs del servidor.',
+        timestamp: new Date().toISOString()
+    });
 });
 
 // =============================================
@@ -1190,10 +1349,22 @@ app.get('/api/debug/estructura', async (req, res) => {
 // =============================================
 
 app.use((err, req, res, next) => {
-    console.error('Error:', err.stack);
+    console.error('💥 Error no manejado:', err);
+    console.error('Stack trace:', err.stack);
+    console.error('Request details:', {
+        method: req.method,
+        url: req.url,
+        body: req.body,
+        params: req.params,
+        query: req.query
+    });
+    
     res.status(500).json({ 
         message: 'Error interno del servidor',
-        error: process.env.NODE_ENV === 'development' ? err.message : {}
+        error: process.env.NODE_ENV === 'development' ? {
+            message: err.message,
+            stack: err.stack
+        } : {}
     });
 });
 
@@ -1219,9 +1390,13 @@ const startServer = async () => {
             console.log(`📋 Endpoints disponibles:`);
             console.log(`   ✅ GET  /api/health`);
             console.log(`   ✅ GET  /api/test-db`);
+            console.log(`   ✅ GET  /api/debug/check-tables`);
+            console.log(`   ✅ GET  /api/test-connection`);
             console.log(`   ✅ POST /api/usuarios/login`);
             console.log(`   ✅ GET  /api/usuarios`);
+            console.log(`   ✅ POST /api/usuarios`);
             console.log(`   ✅ GET  /api/colmenas`);
+            console.log(`   ✅ POST /api/colmenas`);
             console.log(`   ✅ GET  /api/nodos`);
             console.log(`   ✅ GET  /api/mensajes/recientes`);
             console.log(`   ✅ GET  /api/dashboard/stats`);
@@ -1247,9 +1422,3 @@ process.on('SIGINT', async () => {
     process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
-    console.log('\n🔄 Cerrando servidor...');
-    await pool.end();
-    console.log('✅ Pool de conexiones cerrado');
-    process.exit(0);
-});

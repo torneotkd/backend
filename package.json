@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Backend para sistema de gestión apícola SmartBee",
   "main": "app.js",
-  "type": "module",
   "scripts": {
     "start": "node app.js",
     "start:web": "node server.js",
@@ -26,14 +25,5 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
-  },
-  "keywords": [
-    "smartbee",
-    "apicultura",
-    "nodejs",
-    "mysql",
-    "railway"
-  ],
-  "author": "Tu Nombre",
-  "license": "MIT"
+  }
 }

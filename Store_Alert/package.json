@@ -1,0 +1,17 @@
+{
+  "type": "module",
+  "name": "store_alert",
+  "version": "1.0.0",
+  "description": "Almacena los mensajes desde los nodos y detecta/notifica alertas",
+  "main": "index.js",
+  "scripts": {
+    "start": "node Store.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mqtt": "^5.13.1",
+    "mysql2": "^3.14.1",
+    "uuid": "^11.1.0"
+  }
+}

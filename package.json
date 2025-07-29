@@ -2,12 +2,13 @@
   "name": "smartbee-backend",
   "version": "1.0.0",
   "description": "Backend para sistema de gestión apícola SmartBee",
-  "main": "server.js",
+  "main": "app.js",
+  "type": "module",
   "scripts": {
-    "start": "node server.js & node Store.js",
+    "start": "node app.js",
     "start:web": "node server.js",
-    "start:mqtt": "node Store.js",
-    "dev": "nodemon server.js",
+    "start:mqtt": "node Store_Alert/Store.js",
+    "dev": "nodemon app.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "setup-db": "node scripts/setupDatabase.js"
   },

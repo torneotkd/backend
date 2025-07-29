@@ -1,62 +1,21 @@
-import { readFileSync } from 'fs';
-
-// carga certificado del CA
-const CA = readFileSync('<Ubicacion del certifica del CA>');
-
-// configuración del usuario MQTT
-const USER = "<ID del usuario MQTT Store&Alert>";
-const PASS = "<CLAVE del usuario MQTT Store&Alert>";
-const TOPIC = "SmartBee/nodes/+/data";
-
-// configuración del ID de un nodo ambiental para pruebas
-const node_id = "<ID del nodo ambiental para pruebas>";
-
-// configuración de la base de datos
-const db = {
-    host: "127.0.0.1",
-    port: 3306,
-    database: "smartbee",
-    user: "<ID del usuario que almacena en la base de datos>",
-    password: "<CLAVE del usuario que almacena en la base de datos>"
-};
-
-// configuraciones MQTT disponibles
-const mqttWSS = {
-    url: "wss://smartbee.cl:443/apps/mqtt.rcr",
-    ca: CA,
-    username: USER,
-    password: PASS,
-    topic: TOPIC,
-};
-
-const mqttTLS = {
-    url: "mqtts://smartbee.cl:8885",
-    ca: CA,
-    username: USER,
-    password: PASS,
-    topic: TOPIC,
-};
-
-const mqttPLAIN = {
-    url: "mqtt://127.0.0.1:1884",
-    ca: null,
-    username: USER,
-    password: PASS,
-    topic: TOPIC,
-};
-
-// configuracion MQTT a utilizar
-const mqtt = mqttPLAIN;
-
-// para depurar en la consola
-const debug = true;
-
-// la configuracion a exportar
+// Store_Alert/Config (Secret).js
 const config = {
-    db,
-    mqtt,
-    node_id,
-    debug
+    db: {
+        host: process.env.MYSQL_HOST || "crossover.proxy.rlwy.net",
+        port: process.env.MYSQL_PORT || 23151,
+        database: process.env.MYSQL_DATABASE || "railway",
+        user: process.env.MYSQL_USER || "root",
+        password: process.env.MYSQL_PASSWORD || "DwPLKjZIkHdyGcjLmnsmQIwWvDjisbBm"
+    },
+    mqtt: {
+        url: process.env.MQTT_URL || "mqtts://n0740bf0.ala.us-east-1.emqxsl.com:8883",
+        ca: null,
+        username: process.env.MQTT_USER || "smartbee_user",
+        password: process.env.MQTT_PASS || "smartbee123",
+        topic: "SmartBee/nodes/+/data"
+    },
+    nodo_id: "NODO-7881883A-97A5-47E0-869C-753E99E1B168",
+    debug: true
 };
 
 export default config;

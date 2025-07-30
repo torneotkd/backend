@@ -910,7 +910,352 @@ app.get('/api/nodo-tipos', async (req, res) => {
         if (connection) connection.release();
     }
 });
+// =============================================
+// RUTAS PARA NODO_MENSAJE - DATOS REALES
+// =============================================
 
+// Obtener todos los mensajes ordenados cronológicamente
+app.get('/api/nodo-mensajes', async (req, res) => {
+    let connection;
+    try {
+        const { limit = 1000, hours, order = 'ASC' } = req.query;
+        
+        console.log('📊 Obteniendo mensajes de nodo_mensaje...');
+        
+        connection = await pool.getConnection();
+        
+        let query = `
+            SELECT nm.id, nm.nodo_id, nm.topico, nm.payload, nm.fecha,
+                   n.descripcion as nodo_descripcion, n.tipo as nodo_tipo
+            FROM nodo_mensaje nm
+            LEFT JOIN nodo n ON nm.nodo_id = n.id
+        `;
+        let params = [];
+        
+        // Filtrar por horas si se especifica
+        if (hours) {
+            query += ` WHERE nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)`;
+            params.push(parseInt(hours));
+        }
+        
+        query += ` ORDER BY nm.fecha ${order === 'DESC' ? 'DESC' : 'ASC'} LIMIT ?`;
+        params.push(parseInt(limit));
+        
+        const [rows] = await connection.execute(query, params);
+        
+        // Procesar cada mensaje y extraer datos del JSON payload
+        const mensajes = rows.map(mensaje => {
+            let parsedData = {};
+            
+            try {
+                // El payload es JSON, extraer los datos
+                parsedData = JSON.parse(mensaje.payload);
+            } catch (e) {
+                console.warn('Error parsing JSON payload:', e.message);
+                parsedData = { raw_payload: mensaje.payload };
+            }
+            
+            return {
+                id: mensaje.id,
+                nodo_id: mensaje.nodo_id,
+                nodo_descripcion: mensaje.nodo_descripcion,
+                nodo_tipo: mensaje.nodo_tipo,
+                topico: mensaje.topico,
+                payload: mensaje.payload, // JSON original
+                parsed_data: parsedData,  // Datos parseados
+                fecha: mensaje.fecha,
+                // Extraer valores específicos para el gráfico
+                temperatura: parsedData.temperatura || null,
+                humedad: parsedData.humedad || null,
+                peso: parsedData.peso || null,
+                latitud: parsedData.latitud || null,
+                longitud: parsedData.longitud || null
+            };
+        });
+        
+        console.log('✅ Mensajes procesados:', mensajes.length);
+        res.json(mensajes);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodo_mensaje:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo mensajes de nodos',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener solo los datos más recientes para el gráfico en tiempo real
+app.get('/api/nodo-mensajes/recientes', async (req, res) => {
+    let connection;
+    try {
+        const { hours = 24, limit = 100 } = req.query;
+        
+        console.log(`📈 Obteniendo datos recientes (últimas ${hours}h)...`);
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT nm.id, nm.nodo_id, nm.topico, nm.payload, nm.fecha,
+                   n.descripcion as nodo_descripcion
+            FROM nodo_mensaje nm
+            LEFT JOIN nodo n ON nm.nodo_id = n.id
+            WHERE nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+            ORDER BY nm.fecha ASC
+            LIMIT ?
+        `, [parseInt(hours), parseInt(limit)]);
+        
+        // Procesar solo los datos necesarios para el gráfico
+        const datosGrafico = rows.map(mensaje => {
+            let data = {};
+            
+            try {
+                data = JSON.parse(mensaje.payload);
+            } catch (e) {
+                return null;
+            }
+            
+            return {
+                nodo_id: mensaje.nodo_id,
+                timestamp: mensaje.fecha,
+                temperatura: parseFloat(data.temperatura) || 0,
+                humedad: parseFloat(data.humedad) || 0,
+                peso: parseFloat(data.peso) || 0,
+                topico: mensaje.topico
+            };
+        }).filter(item => item !== null);
+        
+        console.log('✅ Datos para gráfico:', datosGrafico.length);
+        res.json(datosGrafico);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo datos recientes:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo datos recientes',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Crear nuevo mensaje en nodo_mensaje
+app.post('/api/nodo-mensajes', async (req, res) => {
+    let connection;
+    try {
+        const { nodo_id, topico, payload } = req.body;
+        
+        console.log('➕ Creando nuevo mensaje nodo:', { nodo_id, topico });
+        
+        if (!nodo_id || !topico || !payload) {
+            return res.status(400).json({ 
+                error: 'nodo_id, topico y payload son obligatorios' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Validar que el payload sea JSON válido
+        let validatedPayload;
+        try {
+            if (typeof payload === 'string') {
+                JSON.parse(payload);
+                validatedPayload = payload;
+            } else {
+                validatedPayload = JSON.stringify(payload);
+            }
+        } catch (e) {
+            return res.status(400).json({ 
+                error: 'El payload debe ser un JSON válido' 
+            });
+        }
+        
+        // Insertar nuevo mensaje
+        const [result] = await connection.execute(`
+            INSERT INTO nodo_mensaje (nodo_id, topico, payload, fecha) 
+            VALUES (?, ?, ?, NOW(3))
+        `, [nodo_id, topico, validatedPayload]);
+        
+        console.log('✅ Mensaje creado con ID:', result.insertId);
+        
+        res.status(201).json({
+            id: result.insertId,
+            nodo_id,
+            topico,
+            payload: validatedPayload,
+            message: 'Mensaje creado exitosamente'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error creando mensaje:', error);
+        res.status(500).json({ 
+            error: 'Error creando mensaje',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Eliminar mensaje (solo para administradores)
+app.delete('/api/nodo-mensajes/:id', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        
+        console.log('🗑️ Eliminando mensaje:', id);
+        
+        connection = await pool.getConnection();
+        
+        const [result] = await connection.execute(
+            'DELETE FROM nodo_mensaje WHERE id = ?', 
+            [id]
+        );
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Mensaje no encontrado' });
+        }
+        
+        console.log('✅ Mensaje eliminado:', id);
+        res.json({ message: 'Mensaje eliminado correctamente' });
+        
+    } catch (error) {
+        console.error('💥 Error eliminando mensaje:', error);
+        res.status(500).json({ 
+            error: 'Error eliminando mensaje',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener estadísticas de los mensajes
+app.get('/api/nodo-mensajes/stats', async (req, res) => {
+    let connection;
+    try {
+        console.log('📊 Obteniendo estadísticas de mensajes...');
+        
+        connection = await pool.getConnection();
+        
+        // Total de mensajes
+        const [total] = await connection.execute('SELECT COUNT(*) as count FROM nodo_mensaje');
+        
+        // Mensajes por nodo
+        const [porNodo] = await connection.execute(`
+            SELECT nodo_id, COUNT(*) as count 
+            FROM nodo_mensaje 
+            GROUP BY nodo_id 
+            ORDER BY count DESC
+        `);
+        
+        // Mensajes por tópico
+        const [porTopico] = await connection.execute(`
+            SELECT topico, COUNT(*) as count 
+            FROM nodo_mensaje 
+            GROUP BY topico 
+            ORDER BY count DESC
+        `);
+        
+        // Mensajes de la última hora
+        const [ultimaHora] = await connection.execute(`
+            SELECT COUNT(*) as count 
+            FROM nodo_mensaje 
+            WHERE fecha >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        `);
+        
+        // Rango de fechas
+        const [rango] = await connection.execute(`
+            SELECT 
+                MIN(fecha) as primer_mensaje,
+                MAX(fecha) as ultimo_mensaje
+            FROM nodo_mensaje
+        `);
+        
+        const stats = {
+            total: total[0].count,
+            ultimaHora: ultimaHora[0].count,
+            porNodo: porNodo.reduce((acc, item) => {
+                acc[item.nodo_id] = item.count;
+                return acc;
+            }, {}),
+            porTopico: porTopico.reduce((acc, item) => {
+                acc[item.topico] = item.count;
+                return acc;
+            }, {}),
+            rango: rango[0]
+        };
+        
+        console.log('✅ Estadísticas calculadas');
+        res.json(stats);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo estadísticas:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo estadísticas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener últimos datos únicos por nodo (para valores actuales)
+app.get('/api/nodo-mensajes/latest', async (req, res) => {
+    let connection;
+    try {
+        console.log('⏰ Obteniendo últimos datos por nodo...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT nm1.id, nm1.nodo_id, nm1.topico, nm1.payload, nm1.fecha,
+                   n.descripcion as nodo_descripcion
+            FROM nodo_mensaje nm1
+            INNER JOIN (
+                SELECT nodo_id, MAX(fecha) as max_fecha
+                FROM nodo_mensaje
+                GROUP BY nodo_id
+            ) nm2 ON nm1.nodo_id = nm2.nodo_id AND nm1.fecha = nm2.max_fecha
+            LEFT JOIN nodo n ON nm1.nodo_id = n.id
+            ORDER BY nm1.fecha DESC
+        `);
+        
+        const ultimosDatos = rows.map(mensaje => {
+            let data = {};
+            try {
+                data = JSON.parse(mensaje.payload);
+            } catch (e) {
+                data = { error: 'Invalid JSON' };
+            }
+            
+            return {
+                nodo_id: mensaje.nodo_id,
+                nodo_descripcion: mensaje.nodo_descripcion,
+                fecha: mensaje.fecha,
+                topico: mensaje.topico,
+                temperatura: data.temperatura || null,
+                humedad: data.humedad || null,
+                peso: data.peso || null,
+                payload_completo: data
+            };
+        });
+        
+        console.log('✅ Últimos datos obtenidos:', ultimosDatos.length);
+        res.json(ultimosDatos);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo últimos datos:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo últimos datos',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 // =============================================
 // RUTAS PARA MENSAJES - CORREGIDAS PARA ESQUEMA REAL
 // =============================================

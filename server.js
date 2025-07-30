@@ -260,6 +260,10 @@ app.post('/api/usuarios/login', async (req, res) => {
 // RUTAS PARA USUARIOS - CORREGIDAS PARA ESQUEMA REAL
 // =============================================
 
+// =============================================
+// RUTAS PARA USUARIOS - ACTUALIZADAS PARA INCLUIR COMUNA
+// =============================================
+
 app.get('/api/usuarios', async (req, res) => {
     let connection;
     try {
@@ -268,7 +272,7 @@ app.get('/api/usuarios', async (req, res) => {
         connection = await pool.getConnection();
         
         const [rows] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.clave, u.rol, u.activo,
+            SELECT u.id, u.nombre, u.apellido, u.comuna, u.clave, u.rol, u.activo,
                    r.descripcion as rol_nombre
             FROM usuario u 
             LEFT JOIN rol r ON u.rol = r.rol 
@@ -281,10 +285,11 @@ app.get('/api/usuarios', async (req, res) => {
             id: user.id,
             nombre: user.nombre,
             apellido: user.apellido,
-            email: user.nombre, // Usar nombre como email temporalmente
+            comuna: user.comuna, // Nuevo campo
+            email: user.id, // Usar id como email temporalmente
             telefono: '', // No existe en tu esquema
             fecha_registro: new Date().toISOString(), // Temporalmente
-            rol: user.rol, // String como 'ADM', 'API', 'INV'
+            rol: user.rol, // String como 'ADM', 'API'
             rol_nombre: user.rol_nombre || 'Usuario', // Nombre descriptivo del rol
             activo: user.activo
         }));
@@ -303,7 +308,7 @@ app.get('/api/usuarios', async (req, res) => {
 });
 
 // =============================================
-// FIXED POST /api/usuarios ENDPOINT
+// CREAR USUARIO ACTUALIZADO CON COMUNA
 // =============================================
 
 app.post('/api/usuarios', async (req, res) => {
@@ -311,23 +316,23 @@ app.post('/api/usuarios', async (req, res) => {
     try {
         console.log('\n🔥 CREANDO USUARIO...');
         console.log('📋 Body RAW:', req.body);
-        console.log('📋 Body keys:', Object.keys(req.body));
-        console.log('📋 Body values:', Object.values(req.body));
         
         connection = await pool.getConnection();
         console.log('✅ Conexión obtenida');
         
-        // Extract data with proper handling for id
-        const { id, nombre, apellido, clave, rol } = req.body;
-        console.log('📝 Datos extraídos individualmente:', { 
+        // Extract data including new comuna field
+        const { id, nombre, apellido, comuna, clave, rol, activo } = req.body;
+        console.log('📝 Datos extraídos:', { 
             id: `"${id}"`, 
             nombre: `"${nombre}"`, 
             apellido: `"${apellido}"`, 
+            comuna: `"${comuna}"`,
             clave: clave ? `"${clave}"` : '[FALTANTE]', 
-            rol: `"${rol}"` 
+            rol: `"${rol}"`,
+            activo: activo
         });
         
-        // FIXED VALIDATION - Check for empty strings and null values
+        // VALIDACIONES ACTUALIZADAS
         if (!nombre || nombre.trim() === '') {
             console.log('❌ Nombre faltante o vacío');
             return res.status(400).json({ 
@@ -339,6 +344,14 @@ app.post('/api/usuarios', async (req, res) => {
             console.log('❌ Apellido faltante o vacío');
             return res.status(400).json({ 
                 error: 'El apellido es obligatorio' 
+            });
+        }
+
+        // Nueva validación para comuna
+        if (!comuna || comuna.trim() === '') {
+            console.log('❌ Comuna faltante o vacía');
+            return res.status(400).json({ 
+                error: 'La comuna es obligatoria' 
             });
         }
         
@@ -379,13 +392,27 @@ app.post('/api/usuarios', async (req, res) => {
             });
         }
         
-        // Execute INSERT
+        // Hash password if it's not already hashed
+        let hashedPassword = clave.trim();
+        if (!clave.startsWith('$2a$') && !clave.startsWith('$2b$')) {
+            hashedPassword = await bcrypt.hash(clave.trim(), 12);
+        }
+        
+        // Execute INSERT with comuna field
         console.log('💾 Ejecutando INSERT...');
-        const insertQuery = 'INSERT INTO usuario (id, nombre, apellido, clave, rol, activo) VALUES (?, ?, ?, ?, ?, 1)';
-        const insertParams = [userId, nombre.trim(), apellido.trim(), clave.trim(), rol.trim()];
+        const insertQuery = 'INSERT INTO usuario (id, nombre, apellido, comuna, clave, rol, activo) VALUES (?, ?, ?, ?, ?, ?, ?)';
+        const insertParams = [
+            userId, 
+            nombre.trim(), 
+            apellido.trim(), 
+            comuna.trim(), // Nuevo campo
+            hashedPassword, 
+            rol.trim(), 
+            activo !== undefined ? (activo ? 1 : 0) : 1
+        ];
         
         console.log('📝 Query:', insertQuery);
-        console.log('📝 Params:', insertParams);
+        console.log('📝 Params:', insertParams.map((p, i) => i === 4 ? '[PASSWORD_HIDDEN]' : p));
         
         const [result] = await connection.execute(insertQuery, insertParams);
         
@@ -400,8 +427,9 @@ app.post('/api/usuarios', async (req, res) => {
                 id: userId,
                 nombre: nombre.trim(),
                 apellido: apellido.trim(),
+                comuna: comuna.trim(), // Nuevo campo
                 rol: rol.trim(),
-                activo: 1
+                activo: activo !== undefined ? (activo ? 1 : 0) : 1
             }
         });
         
@@ -436,239 +464,14 @@ app.post('/api/usuarios', async (req, res) => {
 });
 
 // =============================================
-// ADDITIONAL DEBUG ENDPOINT TO TEST DATA RECEPTION
+// ACTUALIZAR USUARIO CON COMUNA
 // =============================================
-
-app.post('/api/debug/test-data', async (req, res) => {
-    console.log('\n🔍 DEBUG: Datos recibidos en el servidor');
-    console.log('📋 req.body:', req.body);
-    console.log('📋 req.body type:', typeof req.body);
-    console.log('📋 req.body keys:', Object.keys(req.body));
-    
-    // Test each field individually
-    const { id, nombre, apellido, clave, rol } = req.body;
-    
-    const fieldTests = {
-        id: {
-            value: id,
-            type: typeof id,
-            empty: !id,
-            emptyTrim: !id || id.trim() === '',
-            length: id ? id.length : 0
-        },
-        nombre: {
-            value: nombre,
-            type: typeof nombre,
-            empty: !nombre,
-            emptyTrim: !nombre || nombre.trim() === '',
-            length: nombre ? nombre.length : 0
-        },
-        apellido: {
-            value: apellido,
-            type: typeof apellido,
-            empty: !apellido,
-            emptyTrim: !apellido || apellido.trim() === '',
-            length: apellido ? apellido.length : 0
-        },
-        clave: {
-            value: clave,
-            type: typeof clave,
-            empty: !clave,
-            emptyTrim: !clave || clave.trim() === '',
-            length: clave ? clave.length : 0
-        },
-        rol: {
-            value: rol,
-            type: typeof rol,
-            empty: !rol,
-            emptyTrim: !rol || rol.trim() === '',
-            length: rol ? rol.length : 0
-        }
-    };
-    
-    console.log('📊 Field tests:', fieldTests);
-    
-    res.json({
-        message: 'Debug test completed',
-        received_body: req.body,
-        field_analysis: fieldTests,
-        validation_results: {
-            nombre_valid: !(!nombre || nombre.trim() === ''),
-            apellido_valid: !(!apellido || apellido.trim() === ''),
-            clave_valid: !(!clave || clave.trim() === ''),
-            rol_valid: !(!rol || rol.trim() === '')
-        }
-    });
-});
-
-// =============================================
-// ENDPOINT DE PRUEBA DIRECTO
-// =============================================
-
-// Agrega también este endpoint para probar directamente:
-app.post('/api/test-direct-insert', async (req, res) => {
-    let connection;
-    try {
-        console.log('\n🧪 TEST DIRECTO - Insertando usuario hardcodeado...');
-        
-        connection = await pool.getConnection();
-        console.log('✅ Conexión obtenida');
-        
-        // Datos hardcodeados que sabemos que funcionan
-        const testId = `TEST_${Date.now()}`;
-        const insertQuery = 'INSERT INTO usuario (id, nombre, apellido, clave, rol) VALUES (?, ?, ?, ?, ?)';
-        const insertParams = [testId, 'PEDRO', 'VERA', 'admin', 'ADM'];
-        
-        console.log('📝 Ejecutando:', insertQuery);
-        console.log('📝 Con parámetros:', insertParams);
-        
-        const [result] = await connection.execute(insertQuery, insertParams);
-        
-        console.log('✅ INSERT directo exitoso');
-        console.log('📊 Resultado:', result);
-        
-        res.json({
-            success: true,
-            message: 'Usuario de prueba creado exitosamente',
-            id: testId,
-            insertResult: result
-        });
-        
-    } catch (error) {
-        console.error('💥 ERROR en test directo:', error);
-        res.status(500).json({
-            error: 'Error en test directo',
-            details: error.message,
-            code: error.code
-        });
-    } finally {
-        if (connection) connection.release();
-    }
-});
-
-// =============================================
-// ENDPOINT PARA VER LOGS EN TIEMPO REAL
-// =============================================
-
-app.get('/api/debug/test-connection-detailed', async (req, res) => {
-    let connection;
-    try {
-        console.log('\n🔍 PRUEBA DETALLADA DE CONEXIÓN...');
-        
-        // Paso 1: Obtener conexión
-        console.log('1️⃣ Obteniendo conexión...');
-        connection = await pool.getConnection();
-        console.log('✅ Conexión obtenida exitosamente');
-        
-        // Paso 2: Probar query simple
-        console.log('2️⃣ Probando query simple...');
-        const [simpleTest] = await connection.execute('SELECT 1 as test');
-        console.log('✅ Query simple exitosa:', simpleTest[0]);
-        
-        // Paso 3: Probar acceso a tabla usuario
-        console.log('3️⃣ Probando acceso a tabla usuario...');
-        const [userTableTest] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
-        console.log('✅ Acceso a tabla usuario exitoso, total:', userTableTest[0].count);
-        
-        // Paso 4: Probar DESCRIBE usuario
-        console.log('4️⃣ Verificando estructura de tabla usuario...');
-        const [userStructure] = await connection.execute('DESCRIBE usuario');
-        console.log('✅ Estructura de tabla usuario:', userStructure);
-        
-        // Paso 5: Probar SELECT en tabla rol
-        console.log('5️⃣ Verificando tabla rol...');
-        const [roleTest] = await connection.execute('SELECT rol, descripcion FROM rol');
-        console.log('✅ Roles disponibles:', roleTest);
-        
-        res.json({
-            success: true,
-            tests: {
-                connection: true,
-                simpleQuery: simpleTest[0],
-                userTableAccess: userTableTest[0].count,
-                userTableStructure: userStructure,
-                availableRoles: roleTest
-            }
-        });
-        
-    } catch (error) {
-        console.error('💥 Error en prueba detallada:', error);
-        res.status(500).json({
-            error: 'Error en prueba detallada',
-            details: error.message,
-            step: 'Ver logs del servidor para detalles'
-        });
-    } finally {
-        if (connection) {
-            connection.release();
-            console.log('🔓 Conexión liberada');
-        }
-    }
-});
-
-// =============================================
-// ENDPOINT PARA VERIFICAR ESTADO DE LA BD
-// =============================================
-
-app.get('/api/debug/database-status', async (req, res) => {
-    let connection;
-    try {
-        connection = await pool.getConnection();
-        
-        // Verificar conexión
-        const [connectionTest] = await connection.execute('SELECT 1 as test');
-        
-        // Verificar tabla usuario
-        const [userTableExists] = await connection.execute(`
-            SELECT TABLE_NAME 
-            FROM information_schema.TABLES 
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuario'
-        `);
-        
-        // Verificar tabla rol
-        const [rolTableExists] = await connection.execute(`
-            SELECT TABLE_NAME 
-            FROM information_schema.TABLES 
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rol'
-        `);
-        
-        // Contar registros
-        const [userCount] = await connection.execute('SELECT COUNT(*) as count FROM usuario');
-        const [rolCount] = await connection.execute('SELECT COUNT(*) as count FROM rol');
-        
-        // Verificar roles específicos
-        const [roles] = await connection.execute('SELECT rol, descripcion FROM rol');
-        
-        res.json({
-            database: 'Connected',
-            connection_test: connectionTest[0].test === 1,
-            tables: {
-                usuario_exists: userTableExists.length > 0,
-                rol_exists: rolTableExists.length > 0
-            },
-            counts: {
-                usuarios: userCount[0].count,
-                roles: rolCount[0].count
-            },
-            roles_available: roles
-        });
-        
-    } catch (error) {
-        console.error('Error checking database status:', error);
-        res.status(500).json({ 
-            error: 'Error checking database status',
-            details: error.message 
-        });
-    } finally {
-        if (connection) connection.release();
-    }
-});
 
 app.put('/api/usuarios/:id', async (req, res) => {
     let connection;
     try {
         const { id } = req.params;
-        const { nombre, apellido, clave, rol } = req.body;
+        const { nombre, apellido, comuna, clave, rol, activo } = req.body;
         
         console.log(`✏️ Actualizando usuario ${id}:`, req.body);
         
@@ -680,14 +483,14 @@ app.put('/api/usuarios/:id', async (req, res) => {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
         
-        // Validar campos requeridos
-        if (!nombre || !apellido || !rol) {
+        // Validar campos requeridos incluyendo comuna
+        if (!nombre || !apellido || !comuna || !rol) {
             return res.status(400).json({ 
-                error: 'Nombre, apellido y rol son obligatorios' 
+                error: 'Nombre, apellido, comuna y rol son obligatorios' 
             });
         }
         
-        // Verificar que el rol existe (solo ADM y API según datos oficiales)
+        // Verificar que el rol existe
         const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol]);
         if (rolExists.length === 0) {
             return res.status(400).json({ 
@@ -695,26 +498,47 @@ app.put('/api/usuarios/:id', async (req, res) => {
             });
         }
         
-        // Preparar la consulta de actualización
+        // Preparar la consulta de actualización con comuna
         let updateQuery;
         let updateParams;
         
         if (clave && clave.trim()) {
+            // Hash password if provided
+            let hashedPassword = clave.trim();
+            if (!clave.startsWith('$2a$') && !clave.startsWith('$2b$')) {
+                hashedPassword = await bcrypt.hash(clave.trim(), 12);
+            }
+            
             // Actualizar con nueva clave
             updateQuery = `
                 UPDATE usuario 
-                SET nombre = ?, apellido = ?, clave = ?, rol = ?
+                SET nombre = ?, apellido = ?, comuna = ?, clave = ?, rol = ?, activo = ?
                 WHERE id = ?
             `;
-            updateParams = [nombre.trim(), apellido.trim(), clave.trim(), rol, id];
+            updateParams = [
+                nombre.trim(), 
+                apellido.trim(), 
+                comuna.trim(), 
+                hashedPassword, 
+                rol, 
+                activo !== undefined ? (activo ? 1 : 0) : 1,
+                id
+            ];
         } else {
             // Actualizar sin cambiar la clave
             updateQuery = `
                 UPDATE usuario 
-                SET nombre = ?, apellido = ?, rol = ?
+                SET nombre = ?, apellido = ?, comuna = ?, rol = ?, activo = ?
                 WHERE id = ?
             `;
-            updateParams = [nombre.trim(), apellido.trim(), rol, id];
+            updateParams = [
+                nombre.trim(), 
+                apellido.trim(), 
+                comuna.trim(), 
+                rol, 
+                activo !== undefined ? (activo ? 1 : 0) : 1,
+                id
+            ];
         }
         
         // Ejecutar actualización
@@ -724,7 +548,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
         
         // Obtener el usuario actualizado para devolverlo
         const [updatedUser] = await connection.execute(`
-            SELECT u.id, u.nombre, u.apellido, u.rol, u.activo,
+            SELECT u.id, u.nombre, u.apellido, u.comuna, u.rol, u.activo,
                    r.descripcion as rol_nombre
             FROM usuario u
             LEFT JOIN rol r ON u.rol = r.rol
@@ -737,7 +561,8 @@ app.put('/api/usuarios/:id', async (req, res) => {
                 id: updatedUser[0].id,
                 nombre: updatedUser[0].nombre,
                 apellido: updatedUser[0].apellido,
-                email: updatedUser[0].nombre,
+                comuna: updatedUser[0].comuna, // Nuevo campo
+                email: updatedUser[0].id,
                 telefono: '',
                 fecha_registro: new Date().toISOString(),
                 rol: updatedUser[0].rol,
@@ -775,7 +600,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         const usuario = userExists[0];
         
         // Verificar si el usuario tiene colmenas asociadas
-        const [colmenasAsociadas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ? AND activo = 1', [id]);
+        const [colmenasAsociadas] = await connection.execute('SELECT COUNT(*) as count FROM colmena WHERE dueno = ?', [id]);
         
         if (colmenasAsociadas[0].count > 0) {
             return res.status(400).json({ 
@@ -783,7 +608,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
             });
         }
         
-        // En lugar de eliminar, marcar como inactivo (soft delete)
+        // Soft delete - marcar como inactivo
         await connection.execute('UPDATE usuario SET activo = 0 WHERE id = ?', [id]);
         
         console.log('✅ Usuario marcado como inactivo:', id);
@@ -798,7 +623,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
         // Error específico para foreign key constraint
         if (error.code === 'ER_ROW_IS_REFERENCED_2') {
             return res.status(400).json({ 
-                error: 'No se puede eliminar el usuario porque tiene registros asociados (colmenas, etc.)'
+                error: 'No se puede eliminar el usuario porque tiene registros asociados (colmenas, estaciones, etc.)'
             });
         }
         
@@ -812,7 +637,7 @@ app.delete('/api/usuarios/:id', async (req, res) => {
 });
 
 // =============================================
-// RUTAS PARA ROLES - CORREGIDAS PARA ESQUEMA REAL
+// RUTAS PARA ROLES
 // =============================================
 
 app.get('/api/roles', async (req, res) => {
@@ -837,6 +662,7 @@ app.get('/api/roles', async (req, res) => {
         if (connection) connection.release();
     }
 });
+
 
 // =============================================
 // RUTAS PARA COLMENAS - CORREGIDAS PARA ESQUEMA REAL

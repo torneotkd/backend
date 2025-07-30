@@ -1257,6 +1257,160 @@ app.get('/api/nodo-mensajes/latest', async (req, res) => {
     }
 });
 // =============================================
+// RUTAS PARA NODO_MENSAJE - DATOS REALES (Railway Compatible)
+// =============================================
+
+// Obtener mensajes recientes (principal para el dashboard)
+app.get('/api/nodo-mensajes/recientes', async (req, res) => {
+    let connection;
+    try {
+        const { hours = 24, limit = 500 } = req.query;
+        
+        console.log(`📈 Obteniendo datos recientes (últimas ${hours}h, límite ${limit})...`);
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT nm.id, nm.nodo_id, nm.topico, nm.payload, nm.fecha,
+                   n.descripcion as nodo_descripcion, n.tipo as nodo_tipo
+            FROM nodo_mensaje nm
+            LEFT JOIN nodo n ON nm.nodo_id = n.id
+            WHERE nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+            ORDER BY nm.fecha ASC
+            LIMIT ?
+        `, [parseInt(hours), parseInt(limit)]);
+        
+        console.log('✅ Mensajes obtenidos:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo datos recientes:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo datos recientes',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Crear nuevo mensaje (para pruebas)
+app.post('/api/nodo-mensajes', async (req, res) => {
+    let connection;
+    try {
+        const { nodo_id, topico, payload } = req.body;
+        
+        console.log('➕ Creando nuevo mensaje:', { nodo_id, topico });
+        
+        if (!nodo_id || !topico || !payload) {
+            return res.status(400).json({ 
+                error: 'nodo_id, topico y payload son obligatorios' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Validar que el payload sea JSON válido
+        let validatedPayload;
+        try {
+            if (typeof payload === 'string') {
+                JSON.parse(payload);
+                validatedPayload = payload;
+            } else {
+                validatedPayload = JSON.stringify(payload);
+            }
+        } catch (e) {
+            return res.status(400).json({ 
+                error: 'El payload debe ser un JSON válido' 
+            });
+        }
+        
+        // Insertar nuevo mensaje
+        const [result] = await connection.execute(`
+            INSERT INTO nodo_mensaje (nodo_id, topico, payload, fecha) 
+            VALUES (?, ?, ?, NOW(3))
+        `, [nodo_id, topico, validatedPayload]);
+        
+        console.log('✅ Mensaje creado con ID:', result.insertId);
+        
+        res.status(201).json({
+            id: result.insertId,
+            nodo_id,
+            topico,
+            payload: validatedPayload,
+            message: 'Mensaje creado exitosamente'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error creando mensaje:', error);
+        res.status(500).json({ 
+            error: 'Error creando mensaje',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener estadísticas de los mensajes
+app.get('/api/nodo-mensajes/stats', async (req, res) => {
+    let connection;
+    try {
+        console.log('📊 Obteniendo estadísticas de mensajes...');
+        
+        connection = await pool.getConnection();
+        
+        // Total de mensajes
+        const [total] = await connection.execute('SELECT COUNT(*) as count FROM nodo_mensaje');
+        
+        // Mensajes por nodo
+        const [porNodo] = await connection.execute(`
+            SELECT nodo_id, COUNT(*) as count 
+            FROM nodo_mensaje 
+            GROUP BY nodo_id 
+            ORDER BY count DESC
+            LIMIT 10
+        `);
+        
+        // Mensajes de la última hora
+        const [ultimaHora] = await connection.execute(`
+            SELECT COUNT(*) as count 
+            FROM nodo_mensaje 
+            WHERE fecha >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        `);
+        
+        // Rango de fechas
+        const [rango] = await connection.execute(`
+            SELECT 
+                MIN(fecha) as primer_mensaje,
+                MAX(fecha) as ultimo_mensaje
+            FROM nodo_mensaje
+        `);
+        
+        const stats = {
+            total: total[0].count,
+            ultimaHora: ultimaHora[0].count,
+            porNodo: porNodo.reduce((acc, item) => {
+                acc[item.nodo_id] = item.count;
+                return acc;
+            }, {}),
+            rango: rango[0]
+        };
+        
+        console.log('✅ Estadísticas calculadas');
+        res.json(stats);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo estadísticas:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo estadísticas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// =============================================
 // RUTAS PARA MENSAJES - CORREGIDAS PARA ESQUEMA REAL
 // =============================================
 

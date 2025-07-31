@@ -231,6 +231,13 @@ app.post('/api/usuarios/login', async (req, res) => {
             validPassword = (usuario.clave === password);
         }
         
+        if (!validPassword) {
+            console.log('❌ Contraseña inválida para usuario:', email);
+            return res.status(401).json({ 
+                error: 'Credenciales inválidas' 
+            });
+        }
+        
         console.log('✅ Login exitoso:', { id: usuario.id, nombre: usuario.nombre });
         
         const token = `smartbee_${usuario.id}_${Date.now()}`;
@@ -391,11 +398,8 @@ app.post('/api/usuarios', async (req, res) => {
             });
         }
         
-        // Hash password if it's not already hashed
-        let hashedPassword = clave.trim();
-        if (!clave.startsWith('$2a$') && !clave.startsWith('$2b$')) {
-            hashedPassword = await bcrypt.hash(clave.trim(), 12);
-        }
+        const hashedPassword = await bcrypt.hash(clave.trim(), 12);
+        console.log('🔐 Contraseña hasheada exitosamente');
         
         // Execute INSERT with comuna field
         console.log('💾 Ejecutando INSERT...');
@@ -502,12 +506,8 @@ app.put('/api/usuarios/:id', async (req, res) => {
         let updateParams;
         
         if (clave && clave.trim()) {
-            // Hash password if provided
-            let hashedPassword = clave.trim();
-            if (!clave.startsWith('$2a$') && !clave.startsWith('$2b$')) {
-                hashedPassword = await bcrypt.hash(clave.trim(), 12);
-            }
-            
+            const hashedPassword = await bcrypt.hash(clave.trim(), 12);
+            console.log('🔐 Contraseña actualizada y hasheada');
             // Actualizar con nueva clave
             updateQuery = `
                 UPDATE usuario 

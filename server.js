@@ -188,7 +188,7 @@ app.get('/api/test-connection', async (req, res) => {
 // RUTAS DE AUTENTICACIÓN
 // =============================================
 
-app.post('/api/usuarios/login', async (req, res) => {
+app.post('/api/usuarios/login',loginRateLimit, async (req, res) => {
     let connection;
     try {
         const { email, password } = req.body;
@@ -310,115 +310,52 @@ app.get('/api/usuarios', async (req, res) => {
 // CREAR USUARIO ACTUALIZADO CON COMUNA
 // =============================================
 
+// Función helper para verificar y hashear contraseñas
+const hashPasswordIfNeeded = async (password) => {
+    // Si ya está hasheada, devolverla tal como está
+    if (password.startsWith('$2a$') || password.startsWith('$2b$')) {
+        return password;
+    }
+    
+    // Si es texto plano, hashearla
+    return await bcrypt.hash(password, 12);
+};
+
+// Uso en creación de usuarios (mejorado):
 app.post('/api/usuarios', async (req, res) => {
     let connection;
     try {
-        console.log('\n🔥 CREANDO USUARIO...');
-        console.log('📋 Body RAW:', req.body);
-        
-        connection = await pool.getConnection();
-        console.log('✅ Conexión obtenida');
-        
-        // Extract data including new comuna field
         const { id, nombre, apellido, comuna, clave, rol, activo } = req.body;
-        console.log('📝 Datos extraídos:', { 
-            id: `"${id}"`, 
-            nombre: `"${nombre}"`, 
-            apellido: `"${apellido}"`, 
-            comuna: `"${comuna}"`,
-            clave: clave ? `"${clave}"` : '[FALTANTE]', 
-            rol: `"${rol}"`,
-            activo: activo
-        });
         
-        // VALIDACIONES ACTUALIZADAS
-        if (!nombre || nombre.trim() === '') {
-            console.log('❌ Nombre faltante o vacío');
-            return res.status(400).json({ 
-                error: 'El nombre es obligatorio' 
-            });
-        }
-        
-        if (!apellido || apellido.trim() === '') {
-            console.log('❌ Apellido faltante o vacío');
-            return res.status(400).json({ 
-                error: 'El apellido es obligatorio' 
-            });
-        }
-
-        // Nueva validación para comuna
-        if (!comuna || comuna.trim() === '') {
-            console.log('❌ Comuna faltante o vacía');
-            return res.status(400).json({ 
-                error: 'La comuna es obligatoria' 
-            });
-        }
-        
+        // Validaciones...
         if (!clave || clave.trim() === '') {
-            console.log('❌ Clave faltante o vacía');
             return res.status(400).json({ 
                 error: 'La clave es obligatoria' 
             });
         }
         
-        if (!rol || rol.trim() === '') {
-            console.log('❌ Rol faltante o vacío');
-            return res.status(400).json({ 
-                error: 'El rol es obligatorio' 
-            });
-        }
+        connection = await pool.getConnection();
         
-        console.log('✅ Todos los campos válidos');
+        // Hashear la contraseña siempre
+        const hashedPassword = await hashPasswordIfNeeded(clave.trim());
         
-        // Generate ID if not provided, or use provided one
-        const userId = id && id.trim() ? id.trim() : `USR_${Date.now()}`;
-        console.log('🆔 ID a usar:', userId);
+        const insertQuery = `
+            INSERT INTO usuario (id, clave, nombre, apellido, comuna, rol, activo) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `;
         
-        // Check if user with same id already exists
-        const [existingUser] = await connection.execute('SELECT id FROM usuario WHERE id = ?', [userId]);
-        if (existingUser.length > 0) {
-            return res.status(400).json({ 
-                error: `Ya existe un usuario con el ID: ${userId}` 
-            });
-        }
-        
-        // Verify that the role exists
-        const [rolExists] = await connection.execute('SELECT rol FROM rol WHERE rol = ?', [rol.trim()]);
-        if (rolExists.length === 0) {
-            console.log('❌ Rol no válido:', rol);
-            return res.status(400).json({ 
-                error: `El rol '${rol}' no existe. Use uno de los roles válidos.` 
-            });
-        }
-        
-        // Hash password if it's not already hashed
-        let hashedPassword = clave.trim();
-        if (!clave.startsWith('$2a$') && !clave.startsWith('$2b$')) {
-            hashedPassword = await bcrypt.hash(clave.trim(), 12);
-        }
-        
-        // Execute INSERT with comuna field
-        console.log('💾 Ejecutando INSERT...');
-        const insertQuery = 'INSERT INTO usuario (id, clave, nombre, apellido, comuna, rol, activo) VALUES (?, ?, ?, ?, ?, ?, ?)';
         const insertParams = [
             userId, 
             hashedPassword,
             nombre.trim(), 
             apellido.trim(), 
-            comuna.trim(), // NUEVO CAMPO
+            comuna.trim(),
             rol.trim(), 
             activo !== undefined ? (activo ? 1 : 0) : 1
         ];
         
-        console.log('📝 Query:', insertQuery);
-        console.log('📝 Params:', insertParams.map((p, i) => i === 4 ? '[PASSWORD_HIDDEN]' : p));
+        await connection.execute(insertQuery, insertParams);
         
-        const [result] = await connection.execute(insertQuery, insertParams);
-        
-        console.log('✅ INSERT ejecutado exitosamente');
-        console.log('📊 Resultado:', result);
-        
-        // Return success response
         res.status(201).json({ 
             success: true,
             message: 'Usuario creado exitosamente',
@@ -426,41 +363,215 @@ app.post('/api/usuarios', async (req, res) => {
                 id: userId,
                 nombre: nombre.trim(),
                 apellido: apellido.trim(),
-                comuna: comuna.trim(), // Nuevo campo
+                comuna: comuna.trim(),
                 rol: rol.trim(),
                 activo: activo !== undefined ? (activo ? 1 : 0) : 1
             }
         });
         
     } catch (error) {
-        console.error('💥 ERROR COMPLETO:', error);
-        console.error('📋 Error details:', {
-            message: error.message,
-            code: error.code,
-            errno: error.errno,
-            sql: error.sql,
-            sqlState: error.sqlState,
-            sqlMessage: error.sqlMessage
-        });
-        
-        // Handle duplicate key error
-        if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ 
-                error: 'Ya existe un usuario con ese ID'
-            });
-        }
-        
+        console.error('Error creando usuario:', error);
         res.status(500).json({ 
             error: 'Error creando usuario',
             details: error.message
         });
     } finally {
-        if (connection) {
-            connection.release();
-            console.log('🔓 Conexión liberada');
-        }
+        if (connection) connection.release();
     }
 });
+// ===================================
+// 3. SCRIPT PARA VERIFICAR CONTRASEÑAS
+// ===================================
+
+// Endpoint para verificar qué contraseña corresponde a cada usuario
+app.get('/api/debug/verify-passwords', async (req, res) => {
+    let connection;
+    try {
+        connection = await pool.getConnection();
+        
+        const [usuarios] = await connection.execute(`
+            SELECT id, nombre, apellido, clave FROM usuario WHERE activo = 1
+        `);
+        
+        // Contraseñas comunes para probar
+        const commonPasswords = ['admin123', '123456', 'password', 'admin'];
+        
+        const results = [];
+        
+        for (const usuario of usuarios) {
+            const userResult = {
+                id: usuario.id,
+                nombre: `${usuario.nombre} ${usuario.apellido}`,
+                isHashed: usuario.clave.startsWith('$2a$') || usuario.clave.startsWith('$2b$'),
+                matchingPasswords: []
+            };
+            
+            // Solo probar si la contraseña está hasheada
+            if (userResult.isHashed) {
+                for (const testPass of commonPasswords) {
+                    try {
+                        const matches = await bcrypt.compare(testPass, usuario.clave);
+                        if (matches) {
+                            userResult.matchingPasswords.push(testPass);
+                        }
+                    } catch (e) {
+                        // Ignorar errores de comparación
+                    }
+                }
+            } else {
+                // Si no está hasheada, la contraseña es el texto plano
+                userResult.plainTextPassword = usuario.clave;
+            }
+            
+            results.push(userResult);
+        }
+        
+        res.json({
+            message: 'Verificación de contraseñas completada',
+            results: results
+        });
+        
+    } catch (error) {
+        console.error('Error verificando contraseñas:', error);
+        res.status(500).json({ 
+            error: 'Error verificando contraseñas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// ===================================
+// 4. ENDPOINT PARA CAMBIAR CONTRASEÑA
+// ===================================
+
+app.post('/api/usuarios/:id/change-password', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        const { currentPassword, newPassword } = req.body;
+        
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ 
+                error: 'Contraseña actual y nueva son requeridas' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Verificar usuario y contraseña actual
+        const [users] = await connection.execute(
+            'SELECT id, clave FROM usuario WHERE id = ? AND activo = 1', 
+            [id]
+        );
+        
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+        
+        const usuario = users[0];
+        
+        // Verificar contraseña actual
+        let validCurrentPassword = false;
+        if (usuario.clave.startsWith('$2a$') || usuario.clave.startsWith('$2b$')) {
+            validCurrentPassword = await bcrypt.compare(currentPassword, usuario.clave);
+        } else {
+            validCurrentPassword = (usuario.clave === currentPassword);
+        }
+        
+        if (!validCurrentPassword) {
+            return res.status(400).json({ error: 'Contraseña actual incorrecta' });
+        }
+        
+        // Hashear nueva contraseña
+        const hashedNewPassword = await bcrypt.hash(newPassword, 12);
+        
+        // Actualizar contraseña
+        await connection.execute(
+            'UPDATE usuario SET clave = ? WHERE id = ?',
+            [hashedNewPassword, id]
+        );
+        
+        res.json({ 
+            message: 'Contraseña actualizada correctamente' 
+        });
+        
+    } catch (error) {
+        console.error('Error cambiando contraseña:', error);
+        res.status(500).json({ 
+            error: 'Error cambiando contraseña',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// ===================================
+// 5. MIDDLEWARE DE AUTENTICACIÓN MEJORADO
+// ===================================
+
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Token de acceso requerido' });
+    }
+    
+    // Verificar formato del token SmartBee
+    if (!token.startsWith('smartbee_')) {
+        return res.status(403).json({ error: 'Token inválido' });
+    }
+    
+    // Extraer ID de usuario del token
+    const tokenParts = token.split('_');
+    if (tokenParts.length !== 3) {
+        return res.status(403).json({ error: 'Formato de token inválido' });
+    }
+    
+    req.userId = tokenParts[1];
+    next();
+};
+
+// Aplicar middleware a rutas protegidas
+app.use('/api/usuarios', authenticateToken);
+app.use('/api/colmenas', authenticateToken);
+app.use('/api/dashboard', authenticateToken);
+
+// ===================================
+// 6. CONFIGURACIÓN DE SEGURIDAD ADICIONAL
+// ===================================
+
+// Rate limiting para login
+const loginAttempts = new Map();
+
+const loginRateLimit = (req, res, next) => {
+    const { email } = req.body;
+    const clientIP = req.ip || req.connection.remoteAddress;
+    const key = `${email || 'unknown'}_${clientIP}`;
+    
+    const now = Date.now();
+    const attempts = loginAttempts.get(key) || { count: 0, lastAttempt: now };
+    
+    // Reset después de 15 minutos
+    if (now - attempts.lastAttempt > 15 * 60 * 1000) {
+        attempts.count = 0;
+    }
+    
+    if (attempts.count >= 5) {
+        return res.status(429).json({ 
+            error: 'Demasiados intentos de login. Intente en 15 minutos.' 
+        });
+    }
+    
+    attempts.count++;
+    attempts.lastAttempt = now;
+    loginAttempts.set(key, attempts);
+    
+    next();
+};
 
 // =============================================
 // ACTUALIZAR USUARIO CON COMUNA

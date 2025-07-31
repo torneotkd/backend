@@ -399,7 +399,7 @@ app.post('/api/usuarios', async (req, res) => {
         }
         
         const hashedPassword = await bcrypt.hash(clave.trim(), 12);
-        console.log('🔐 Contraseña hasheada exitosamente');
+        console.log('🔐 Contraseña hasheada exitosamente en el servidor');
         
         // Execute INSERT with comuna field
         console.log('💾 Ejecutando INSERT...');
@@ -415,8 +415,7 @@ app.post('/api/usuarios', async (req, res) => {
         ];
         
         console.log('📝 Query:', insertQuery);
-        console.log('📝 Params:', insertParams.map((p, i) => i === 4 ? '[PASSWORD_HIDDEN]' : p));
-        
+        console.log('📝 Params:', insertParams.map((p, i) => i === 1 ? '[PASSWORD_HASH_HIDDEN]' : p));        
         const [result] = await connection.execute(insertQuery, insertParams);
         
         console.log('✅ INSERT ejecutado exitosamente');
@@ -507,7 +506,7 @@ app.put('/api/usuarios/:id', async (req, res) => {
         
         if (clave && clave.trim()) {
             const hashedPassword = await bcrypt.hash(clave.trim(), 12);
-            console.log('🔐 Contraseña actualizada y hasheada');
+            console.log('🔐 Contraseña actualizada y hasheada en el servidor');
             // Actualizar con nueva clave
             updateQuery = `
                 UPDATE usuario 

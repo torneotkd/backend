@@ -191,36 +191,64 @@ app.get('/api/test-connection', async (req, res) => {
 app.post('/api/usuarios/login', async (req, res) => {
     let connection;
     try {
-        const { email, password } = req.body;
+        const { email, password, nombre, apellido } = req.body;
         
-        console.log('🔐 Login attempt:', { email });
+        console.log('🔐 Login attempt con datos:', { email, nombre, apellido });
         
-        if (!email || !password) {
+        // Validar que se proporcionen las credenciales necesarias
+        if (!password || password.trim() === '') {
             return res.status(400).json({ 
-                error: 'Email y contraseña son requeridos' 
+                error: 'La contraseña es requerida' 
             });
         }
-        
+
+        // Aceptar tanto email (ID) como nombre+apellido
+        let usuario = null;
         connection = await pool.getConnection();
-        
-        // Buscar usuario por ID (el nuevo esquema usa ID como identificador único)
-        const [rows] = await connection.execute(`
-            SELECT u.id, u.clave, u.nombre, u.apellido, u.comuna, u.rol, u.activo,
-                r.descripcion as rol_descripcion
-            FROM usuario u
-            LEFT JOIN rol r ON u.rol = r.rol
-            WHERE u.id = ? AND u.activo = 1
-        `, [email]);
-        
-        if (rows.length === 0) {
+
+        if (email && email.trim()) {
+            // Buscar por ID (modo original)
+            console.log('🔍 Buscando usuario por ID:', email);
+            const [rows] = await connection.execute(`
+                SELECT u.id, u.clave, u.nombre, u.apellido, u.comuna, u.rol, u.activo,
+                    r.descripcion as rol_descripcion
+                FROM usuario u
+                LEFT JOIN rol r ON u.rol = r.rol
+                WHERE u.id = ? AND u.activo = 1
+            `, [email.trim()]);
+            
+            if (rows.length > 0) {
+                usuario = rows[0];
+                console.log('✅ Usuario encontrado por ID');
+            }
+        }
+
+        // Si no se encontró por ID, buscar por nombre y apellido
+        if (!usuario && nombre && apellido) {
+            console.log('🔍 Buscando usuario por nombre y apellido:', { nombre, apellido });
+            const [rows] = await connection.execute(`
+                SELECT u.id, u.clave, u.nombre, u.apellido, u.comuna, u.rol, u.activo,
+                    r.descripcion as rol_descripcion
+                FROM usuario u
+                LEFT JOIN rol r ON u.rol = r.rol
+                WHERE LOWER(u.nombre) = LOWER(?) AND LOWER(u.apellido) = LOWER(?) AND u.activo = 1
+            `, [nombre.trim(), apellido.trim()]);
+            
+            if (rows.length > 0) {
+                usuario = rows[0];
+                console.log('✅ Usuario encontrado por nombre y apellido');
+            }
+        }
+
+        // Si aún no se encontró usuario
+        if (!usuario) {
+            console.log('❌ Usuario no encontrado con las credenciales proporcionadas');
             return res.status(401).json({ 
-                error: 'Credenciales inválidas' 
+                error: 'Credenciales inválidas. Verifique su nombre, apellido y contraseña.' 
             });
         }
         
-        const usuario = rows[0];
-        
-        // Verificar contraseña (pueden estar hasheadas con bcrypt)
+        // Verificar contraseña
         let validPassword = false;
 
         if (usuario.clave.startsWith('$2a$') || usuario.clave.startsWith('$2b$')) {
@@ -232,13 +260,19 @@ app.post('/api/usuarios/login', async (req, res) => {
         }
         
         if (!validPassword) {
-            console.log('❌ Contraseña inválida para usuario:', email);
+            console.log('❌ Contraseña inválida para usuario:', usuario.id);
             return res.status(401).json({ 
-                error: 'Credenciales inválidas' 
+                error: 'Credenciales inválidas. Verifique su contraseña.' 
             });
         }
         
-        console.log('✅ Login exitoso:', { id: usuario.id, nombre: usuario.nombre });
+        console.log('✅ Login exitoso:', { 
+            id: usuario.id, 
+            nombre: usuario.nombre, 
+            apellido: usuario.apellido,
+            rol: usuario.rol,
+            rol_descripcion: usuario.rol_descripcion
+        });
         
         const token = `smartbee_${usuario.id}_${Date.now()}`;
         
@@ -249,8 +283,10 @@ app.post('/api/usuarios/login', async (req, res) => {
                     id: usuario.id,
                     nombre: usuario.nombre,
                     apellido: usuario.apellido,
-                    email: usuario.nombre, // Usar nombre como email
-                    rol_nombre: usuario.rol_descripcion || 'Usuario'
+                    email: usuario.id, // Mantener compatibilidad
+                    comuna: usuario.comuna,
+                    rol: usuario.rol, // Código del rol (ADM, API, etc.)
+                    rol_nombre: usuario.rol_descripcion || 'Usuario' // Descripción del rol
                 }
             },
             message: 'Login exitoso'

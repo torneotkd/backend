@@ -1293,7 +1293,63 @@
     // RUTAS PARA DASHBOARD - CORREGIDAS
     // =============================================
 // Agregar este endpoint en server.js si no existe:
+// Agregar esta ruta en server.js después de las otras rutas de colmenas
 
+app.get('/api/colmenas/dueno/:duenoId', async (req, res) => {
+    let connection;
+    try {
+        const { duenoId } = req.params;
+        
+        console.log(`🏠 Obteniendo colmenas del dueño: ${duenoId}`);
+        
+        connection = await pool.getConnection();
+        
+        const [colmenas] = await connection.execute(`
+            SELECT c.id, c.descripcion, c.latitud, c.longitud, c.dueno,
+                u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna
+            FROM colmena c
+            LEFT JOIN usuario u ON c.dueno = u.id
+            WHERE c.dueno = ?
+            ORDER BY c.id ASC
+        `, [duenoId]);
+        
+        // Formatear para compatibilidad con frontend
+        const colmenasFormateadas = colmenas.map(colmena => ({
+            id: colmena.id,
+            nombre: `Colmena ${colmena.id}`,
+            tipo: 'Langstroth',
+            descripcion: colmena.descripcion,
+            dueno: colmena.dueno,
+            dueno_nombre: colmena.dueno_nombre,
+            dueno_apellido: colmena.dueno_apellido,
+            apiario_id: null,
+            apiario_nombre: colmena.dueno_comuna || 'Sin ubicación',
+            fecha_instalacion: new Date().toISOString(),
+            activa: 1,
+            latitud: colmena.latitud,
+            longitud: colmena.longitud,
+            ubicacion: colmena.latitud && colmena.longitud ? `${colmena.latitud}, ${colmena.longitud}` : null,
+            comuna: colmena.dueno_comuna
+        }));
+        
+        console.log(`✅ Colmenas del dueño ${duenoId} obtenidas:`, colmenasFormateadas.length);
+        
+        res.json({
+            data: colmenasFormateadas,
+            total: colmenasFormateadas.length,
+            dueno: duenoId
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error obteniendo colmenas del dueño ${req.params.duenoId}:`, error);
+        res.status(500).json({ 
+            error: 'Error obteniendo colmenas del dueño',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 // Endpoint para obtener mensajes recientes
 app.get('/api/mensajes/recientes', async (req, res) => {
     let connection;

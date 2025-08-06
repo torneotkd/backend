@@ -22,7 +22,7 @@
 
     app.use(cors({
     origin: [
-        'https://abeja-mu.vercel.app/',
+        'https://abeja-mu.vercel.app',
         'http://localhost:3000',
         'http://localhost:5173',
         'http://localhost:8080'

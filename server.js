@@ -1346,6 +1346,73 @@
             if (connection) connection.release();
         }
     });
+    // Nuevo endpoint para datos específicos del dashboard
+app.get('/api/dashboard/sensor-data', async (req, res) => {
+    let connection;
+    try {
+        const hours = parseInt(req.query.hours) || 168; // 7 días por defecto
+        
+        console.log(`📊 Obteniendo datos específicos de dashboard (últimas ${hours}h)...`);
+        
+        connection = await pool.getConnection();
+        
+        // Obtener datos de ambos nodos específicos
+        const query = `
+            SELECT nm.nodo_id, nm.payload, nm.fecha
+            FROM nodo_mensaje nm
+            WHERE nm.nodo_id IN (?, ?) 
+            AND nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+            ORDER BY nm.fecha ASC
+        `;
+        
+        const nodoInterno = 'NODO-BEF8C985-0FF3-4874-935B-40AA8A235FF7';
+        const nodoExterno = 'NODO-B5B3ABC4-E0CE-4662-ACB3-7A631C12394A';
+        
+        const [rows] = await connection.execute(query, [nodoInterno, nodoExterno, hours]);
+        
+        const datosFormateados = rows.map(row => {
+            let payload = {};
+            try {
+                payload = JSON.parse(row.payload);
+            } catch (e) {
+                console.warn('Error parsing payload:', e);
+                return null;
+            }
+            
+            return {
+                fecha: new Date(row.fecha),
+                nodo_id: row.nodo_id,
+                temperatura: parseFloat(payload.temperatura) || null,
+                humedad: parseFloat(payload.humedad) || null,
+                peso: parseFloat(payload.peso) || null,
+                tipo: row.nodo_id === nodoInterno ? 'interno' : 'externo'
+            };
+        }).filter(item => item !== null);
+        
+        // Separar datos por tipo
+        const datosInternos = datosFormateados.filter(d => d.tipo === 'interno');
+        const datosExternos = datosFormateados.filter(d => d.tipo === 'externo');
+        
+        res.json({
+            internos: datosInternos,
+            externos: datosExternos,
+            combinados: datosFormateados,
+            nodos: {
+                interno: nodoInterno,
+                externo: nodoExterno
+            }
+        });
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo datos del dashboard:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo datos del dashboard',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 
     // =============================================
     // VERIFICAR DATOS OFICIALES

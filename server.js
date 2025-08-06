@@ -1292,7 +1292,138 @@
     // =============================================
     // RUTAS PARA DASHBOARD - CORREGIDAS
     // =============================================
+// Agregar este endpoint en server.js si no existe:
 
+// Endpoint para obtener mensajes recientes
+app.get('/api/mensajes/recientes', async (req, res) => {
+    let connection;
+    try {
+        const hours = parseInt(req.query.hours) || 24;
+        
+        console.log(`📈 Obteniendo mensajes recientes (últimas ${hours}h)...`);
+        
+        connection = await pool.getConnection();
+        
+        const query = `
+            SELECT nm.id, nm.nodo_id, nm.topico, nm.payload, nm.fecha as fecha_recepcion
+            FROM nodo_mensaje nm
+            WHERE nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+            ORDER BY nm.fecha DESC
+            LIMIT 1000
+        `;
+        
+        const [rows] = await connection.execute(query, [hours]);
+        console.log('✅ Mensajes recientes obtenidos:', rows.length);
+        
+        // Procesar los payloads JSON
+        const mensajes = rows.map(mensaje => {
+            let parsedPayload = {};
+            
+            try {
+                if (typeof mensaje.payload === 'string') {
+                    parsedPayload = JSON.parse(mensaje.payload);
+                } else {
+                    parsedPayload = mensaje.payload;
+                }
+            } catch (parseError) {
+                console.warn('⚠️ Error parsing payload JSON:', parseError.message);
+                parsedPayload = { 
+                    error: 'Invalid JSON',
+                    raw: mensaje.payload 
+                };
+            }
+            
+            return {
+                id: mensaje.id,
+                nodo_id: mensaje.nodo_id,
+                topico: mensaje.topico,
+                payload: parsedPayload,
+                fecha_recepcion: mensaje.fecha_recepcion
+            };
+        });
+        
+        res.json({
+            data: mensajes,
+            total: mensajes.length,
+            hours: hours
+        });
+        
+    } catch (error) {
+        console.error('💥 Error en /api/mensajes/recientes:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo mensajes recientes',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// También agrega un endpoint de debug para verificar qué datos existen
+app.get('/api/debug/nodos-data', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔧 Verificando datos de nodos específicos...');
+        
+        connection = await pool.getConnection();
+        
+        const nodoInterno = 'NODO-BEF8C985-0FF3-4874-935B-40AA8A235FF7';
+        const nodoExterno = 'NODO-B5B3ABC4-E0CE-4662-ACB3-7A631C12394A';
+        
+        // Verificar cuántos mensajes hay de cada nodo
+        const [countInterno] = await connection.execute(
+            'SELECT COUNT(*) as count FROM nodo_mensaje WHERE nodo_id = ?', 
+            [nodoInterno]
+        );
+        
+        const [countExterno] = await connection.execute(
+            'SELECT COUNT(*) as count FROM nodo_mensaje WHERE nodo_id = ?', 
+            [nodoExterno]
+        );
+        
+        // Obtener algunos ejemplos de cada nodo
+        const [ejemplosInterno] = await connection.execute(
+            'SELECT id, nodo_id, topico, payload, fecha FROM nodo_mensaje WHERE nodo_id = ? ORDER BY fecha DESC LIMIT 3', 
+            [nodoInterno]
+        );
+        
+        const [ejemplosExterno] = await connection.execute(
+            'SELECT id, nodo_id, topico, payload, fecha FROM nodo_mensaje WHERE nodo_id = ? ORDER BY fecha DESC LIMIT 3', 
+            [nodoExterno]
+        );
+        
+        // Verificar todos los nodos únicos
+        const [todosNodos] = await connection.execute(
+            'SELECT DISTINCT nodo_id, COUNT(*) as count FROM nodo_mensaje GROUP BY nodo_id ORDER BY count DESC'
+        );
+        
+        res.json({
+            nodos_objetivo: {
+                interno: {
+                    id: nodoInterno,
+                    count: countInterno[0].count,
+                    ejemplos: ejemplosInterno
+                },
+                externo: {
+                    id: nodoExterno,
+                    count: countExterno[0].count,
+                    ejemplos: ejemplosExterno
+                }
+            },
+            todos_los_nodos: todosNodos,
+            total_mensajes: todosNodos.reduce((sum, nodo) => sum + nodo.count, 0)
+        });
+        
+    } catch (error) {
+        console.error('💥 Error en debug nodos:', error);
+        res.status(500).json({ 
+            error: 'Error verificando datos de nodos',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
     app.get('/api/dashboard/stats', async (req, res) => {
         let connection;
         try {

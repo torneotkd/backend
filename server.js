@@ -885,7 +885,10 @@ app.post('/api/colmenas', async (req, res) => {
         if (connection) connection.release();
     }
 });
-// AGREGAR después del endpoint POST /api/colmenas:
+// =============================================
+// ENDPOINT PUT PARA ACTUALIZAR COLMENAS (CORREGIDO)
+// =============================================
+
 app.put('/api/colmenas/:id', async (req, res) => {
     let connection;
     try {
@@ -971,15 +974,31 @@ app.put('/api/colmenas/:id', async (req, res) => {
             
             await connection.execute(updateQuery, updateParams);
             
-            // Actualizar nodo interior
+            // Actualizar nodo interior (tabla nodo_colmena)
             await connection.execute('DELETE FROM nodo_colmena WHERE colmena_id = ?', [id]);
             if (nodo_interior) {
                 await connection.execute('INSERT INTO nodo_colmena (colmena_id, nodo_id) VALUES (?, ?)', [id, nodo_interior]);
             }
             
-            // Actualizar nodo exterior
-            await connection.execute('DELETE FROM nodo_estacion WHERE estacion_id = ?', [id]);
+            // Actualizar nodo exterior (tabla nodo_estacion)
+            // ⚠️ NOTA: Esto requiere que exista una estación con el mismo ID de la colmena
+            // o que adaptemos la lógica según tu modelo de negocio
             if (nodo_exterior) {
+                // Verificar si existe una estación con el ID de la colmena
+                const [estacionExists] = await connection.execute('SELECT id FROM estacion WHERE id = ?', [id]);
+                
+                if (estacionExists.length === 0) {
+                    // Crear estación automáticamente si no existe
+                    const lat = latitud ? parseFloat(latitud) : -36.6009157;
+                    const lng = longitud ? parseFloat(longitud) : -72.1064020;
+                    
+                    await connection.execute(`
+                        INSERT INTO estacion (id, descripcion, latitud, longitud, dueno) 
+                        VALUES (?, ?, ?, ?, ?)
+                    `, [id, `Estación meteorológica de ${descripcion}`, lat, lng, dueno]);
+                }
+                
+                await connection.execute('DELETE FROM nodo_estacion WHERE estacion_id = ?', [id]);
                 await connection.execute('INSERT INTO nodo_estacion (estacion_id, nodo_id) VALUES (?, ?)', [id, nodo_exterior]);
             }
             
@@ -1000,6 +1019,136 @@ app.put('/api/colmenas/:id', async (req, res) => {
         console.error('💥 Error actualizando colmena:', error);
         res.status(500).json({ 
             error: 'Error actualizando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// ENDPOINTS PARA NODOS DISPONIBLES (CORREGIDOS)
+// =============================================
+
+app.get('/api/nodos/interiores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔌 Obteniendo nodos interiores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_colmena nc ON n.id = nc.nodo_id
+            WHERE nc.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos interiores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos interiores disponibles:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo nodos interiores disponibles',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/nodos/exteriores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🌡️ Obteniendo nodos exteriores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_estacion ne ON n.id = ne.nodo_id
+            WHERE ne.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos exteriores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos exteriores disponibles:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo nodos exteriores disponibles',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// =============================================
+// ENDPOINTS PARA NODOS DISPONIBLES (FALTANTES)
+// =============================================
+
+app.get('/api/nodos/interiores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔌 Obteniendo nodos interiores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        // Versión simplificada que funciona aunque no existan las tablas de relación
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos interiores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos interiores disponibles:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo nodos interiores disponibles',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/api/nodos/exteriores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🌡️ Obteniendo nodos exteriores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        // Versión simplificada que funciona aunque no existan las tablas de relación
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos exteriores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos exteriores disponibles:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo nodos exteriores disponibles',
             details: error.message 
         });
     } finally {

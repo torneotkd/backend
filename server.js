@@ -2381,29 +2381,110 @@ app.get('/api/debug/nodos-data', async (req, res) => {
         }
     });
     // Nuevo endpoint para datos específicos del dashboard
+// REEMPLAZAR el endpoint existente con esta versión dinámica por usuario:
 app.get('/api/dashboard/sensor-data', async (req, res) => {
     let connection;
     try {
-        const hours = parseInt(req.query.hours) || 168; // 7 días por defecto
+        const hours = Math.min(parseInt(req.query.hours) || 168, 720); // Máximo 30 días
+        const userId = req.query.userId; // ✅ NUEVO: Recibir ID del usuario
         
-        console.log(`📊 Obteniendo datos específicos de dashboard (últimas ${hours}h)...`);
+        if (!userId) {
+            return res.status(400).json({ 
+                error: 'Se requiere el ID del usuario para obtener datos de sus colmenas' 
+            });
+        }
+        
+        console.log(`📊 Obteniendo datos de colmenas del usuario ${userId} (últimas ${hours}h)...`);
         
         connection = await pool.getConnection();
         
-        // Obtener datos de ambos nodos específicos
+        // ✅ PASO 1: Obtener todas las colmenas del usuario
+        const [colmenasUsuario] = await connection.execute(`
+            SELECT id FROM colmena WHERE dueno = ?
+        `, [userId]);
+        
+        if (colmenasUsuario.length === 0) {
+            return res.json({
+                internos: [],
+                externos: [],
+                combinados: [],
+                nodos: { interno: null, externo: null },
+                message: 'El usuario no tiene colmenas registradas',
+                colmenasCount: 0
+            });
+        }
+        
+        console.log(`✅ Usuario tiene ${colmenasUsuario.length} colmenas`);
+        
+        // ✅ PASO 2: Obtener nodos interiores (de las colmenas del usuario)
+        const colmenaIds = colmenasUsuario.map(c => c.id);
+        const placeholders = colmenaIds.map(() => '?').join(',');
+        
+        const [nodosInteriores] = await connection.execute(`
+            SELECT DISTINCT nc.nodo_id, nc.colmena_id, c.descripcion as colmena_descripcion
+            FROM nodo_colmena nc
+            INNER JOIN colmena c ON nc.colmena_id = c.id
+            WHERE nc.colmena_id IN (${placeholders})
+        `, colmenaIds);
+        
+        // ✅ PASO 3: Obtener nodos exteriores (estaciones asociadas a las colmenas del usuario)
+        const [nodosExteriores] = await connection.execute(`
+            SELECT DISTINCT ne.nodo_id, ne.estacion_id, e.descripcion as estacion_descripcion
+            FROM nodo_estacion ne
+            INNER JOIN estacion e ON ne.estacion_id = e.id
+            WHERE ne.estacion_id IN (${placeholders})
+        `, colmenaIds);
+        
+        console.log(`✅ Nodos encontrados - Interiores: ${nodosInteriores.length}, Exteriores: ${nodosExteriores.length}`);
+        
+        // ✅ PASO 4: Si no hay nodos, devolver respuesta vacía
+        const todosLosNodos = [
+            ...nodosInteriores.map(n => n.nodo_id),
+            ...nodosExteriores.map(n => n.nodo_id)
+        ];
+        
+        if (todosLosNodos.length === 0) {
+            return res.json({
+                internos: [],
+                externos: [],
+                combinados: [],
+                nodos: { interior: [], exterior: [] },
+                message: 'Las colmenas del usuario no tienen nodos asignados',
+                colmenasCount: colmenasUsuario.length
+            });
+        }
+        
+        // ✅ PASO 5: Obtener mensajes de TODOS los nodos del usuario
+        const nodosPlaceholders = todosLosNodos.map(() => '?').join(',');
+        
         const query = `
-            SELECT nm.nodo_id, nm.payload, nm.fecha
+            SELECT nm.nodo_id, nm.payload, nm.fecha, nm.id
             FROM nodo_mensaje nm
-            WHERE nm.nodo_id IN (?, ?) 
+            WHERE nm.nodo_id IN (${nodosPlaceholders})
             AND nm.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
-            ORDER BY nm.fecha ASC
+            ORDER BY nm.fecha DESC
+            LIMIT 5000
         `;
         
-        const nodoInterno = 'NODO-BEF8C985-0FF3-4874-935B-40AA8A235FF7';
-        const nodoExterno = 'NODO-B5B3ABC4-E0CE-4662-ACB3-7A631C12394A';
+        const [rows] = await connection.execute(query, [...todosLosNodos, hours]);
         
-        const [rows] = await connection.execute(query, [nodoInterno, nodoExterno, hours]);
+        console.log(`✅ Datos obtenidos: ${rows.length} registros de ${todosLosNodos.length} nodos`);
         
+        if (rows.length === 0) {
+            return res.json({
+                internos: [],
+                externos: [],
+                combinados: [],
+                nodos: { 
+                    interior: nodosInteriores.map(n => ({ id: n.nodo_id, colmena: n.colmena_descripcion })),
+                    exterior: nodosExteriores.map(n => ({ id: n.nodo_id, estacion: n.estacion_descripcion }))
+                },
+                message: 'No hay datos disponibles para el período solicitado',
+                colmenasCount: colmenasUsuario.length
+            });
+        }
+        
+        // ✅ PASO 6: Procesar y clasificar los datos
         const datosFormateados = rows.map(row => {
             let payload = {};
             try {
@@ -2413,13 +2494,22 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
                 return null;
             }
             
+            // Determinar si es nodo interior o exterior
+            const esInterior = nodosInteriores.find(n => n.nodo_id === row.nodo_id);
+            const esExterior = nodosExteriores.find(n => n.nodo_id === row.nodo_id);
+            
             return {
+                id: row.id,
                 fecha: new Date(row.fecha),
                 nodo_id: row.nodo_id,
                 temperatura: parseFloat(payload.temperatura) || null,
                 humedad: parseFloat(payload.humedad) || null,
                 peso: parseFloat(payload.peso) || null,
-                tipo: row.nodo_id === nodoInterno ? 'interno' : 'externo'
+                tipo: esInterior ? 'interno' : 'externo',
+                colmena_id: esInterior ? esInterior.colmena_id : null,
+                estacion_id: esExterior ? esExterior.estacion_id : null,
+                colmena_descripcion: esInterior ? esInterior.colmena_descripcion : null,
+                estacion_descripcion: esExterior ? esExterior.estacion_descripcion : null
             };
         }).filter(item => item !== null);
         
@@ -2432,9 +2522,22 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
             externos: datosExternos,
             combinados: datosFormateados,
             nodos: {
-                interno: nodoInterno,
-                externo: nodoExterno
-            }
+                interior: nodosInteriores.map(n => ({ 
+                    id: n.nodo_id, 
+                    colmena_id: n.colmena_id,
+                    colmena_descripcion: n.colmena_descripcion 
+                })),
+                exterior: nodosExteriores.map(n => ({ 
+                    id: n.nodo_id, 
+                    estacion_id: n.estacion_id,
+                    estacion_descripcion: n.estacion_descripcion 
+                }))
+            },
+            totalRegistros: datosFormateados.length,
+            horasConsultadas: hours,
+            colmenasCount: colmenasUsuario.length,
+            nodosCount: todosLosNodos.length,
+            userId: userId
         });
         
     } catch (error) {

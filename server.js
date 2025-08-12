@@ -22,7 +22,7 @@
 
     app.use(cors({
     origin: [
-        'https://abeja-mu.vercel.app',
+        'https://abeja-mu.vercel.app/',
         'http://localhost:3000',
         'http://localhost:5173',
         'http://localhost:8080'
@@ -702,98 +702,161 @@
     // RUTAS PARA COLMENAS - CORREGIDAS PARA ESQUEMA REAL
     // =============================================
 
-    app.get('/api/colmenas', async (req, res) => {
-        let connection;
-        try {
-            console.log('🏠 Obteniendo colmenas...');
-            
-            connection = await pool.getConnection();
-            
-            const [colmenas] = await connection.execute(`
-                SELECT c.id, c.descripcion, c.latitud, c.longitud, c.dueno,
-                    u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna
-                FROM colmena c
-                LEFT JOIN usuario u ON c.dueno = u.id
-                ORDER BY c.id ASC
-            `);
-            
-            // Formatear para compatibilidad con frontend
-            const colmenasFormateadas = colmenas.map(colmena => ({
-                id: colmena.id,
-                nombre: `Colmena ${colmena.id}`,
-                tipo: 'Langstroth',
-                descripcion: colmena.descripcion,
-                dueno: colmena.dueno,
-                dueno_nombre: colmena.dueno_nombre,
-                dueno_apellido: colmena.dueno_apellido,
-                apiario_id: null,
-                apiario_nombre: colmena.dueno_comuna || 'Sin ubicación',
-                fecha_instalacion: new Date().toISOString(),
-                activa: 1,
-                latitud: colmena.latitud,
-                longitud: colmena.longitud,
-                ubicacion: colmena.latitud && colmena.longitud ? `${colmena.latitud}, ${colmena.longitud}` : null,
-                comuna: colmena.dueno_comuna
-            }));
-            
-            console.log('✅ Colmenas obtenidas:', colmenasFormateadas.length);
-            res.json(colmenasFormateadas);
-            
-        } catch (error) {
-            console.error('💥 Error obteniendo colmenas:', error);
-            console.error('Error details:', error.message);
-            res.status(500).json({ 
-                error: 'Error obteniendo colmenas',
-                details: error.message 
-            });
-        } finally {
-            if (connection) connection.release();
-        }
-    });
+    // REEMPLAZAR el endpoint existente app.get('/api/colmenas') con:
+app.get('/api/colmenas', async (req, res) => {
+    let connection;
+    try {
+        console.log('🏠 Obteniendo colmenas...');
+        
+        connection = await pool.getConnection();
+        
+        const [colmenas] = await connection.execute(`
+            SELECT c.id, c.descripcion, c.latitud, c.longitud, c.dueno,
+                u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna,
+                nc.nodo_id as nodo_interior_id,
+                n_interior.descripcion as nodo_interior_descripcion,
+                ne.nodo_id as nodo_exterior_id,
+                n_exterior.descripcion as nodo_exterior_descripcion
+            FROM colmena c
+            LEFT JOIN usuario u ON c.dueno = u.id
+            LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+            LEFT JOIN nodo n_interior ON nc.nodo_id = n_interior.id
+            LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+            LEFT JOIN nodo n_exterior ON ne.nodo_id = n_exterior.id
+            ORDER BY c.id ASC
+        `);
+        
+        // Formatear para compatibilidad con frontend
+        const colmenasFormateadas = colmenas.map(colmena => ({
+            id: colmena.id,
+            nombre: `Colmena ${colmena.id}`,
+            tipo: 'Langstroth',
+            descripcion: colmena.descripcion,
+            dueno: colmena.dueno,
+            dueno_nombre: colmena.dueno_nombre,
+            dueno_apellido: colmena.dueno_apellido,
+            apiario_id: null,
+            apiario_nombre: colmena.dueno_comuna || 'Sin ubicación',
+            fecha_instalacion: new Date().toISOString(),
+            activa: 1,
+            latitud: colmena.latitud,
+            longitud: colmena.longitud,
+            ubicacion: colmena.latitud && colmena.longitud ? `${colmena.latitud}, ${colmena.longitud}` : null,
+            comuna: colmena.dueno_comuna,
+            // NUEVOS CAMPOS
+            nodo_interior_id: colmena.nodo_interior_id,
+            nodo_interior_descripcion: colmena.nodo_interior_descripcion,
+            nodo_exterior_id: colmena.nodo_exterior_id,
+            nodo_exterior_descripcion: colmena.nodo_exterior_descripcion
+        }));
+        
+        console.log('✅ Colmenas obtenidas:', colmenasFormateadas.length);
+        res.json(colmenasFormateadas);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo colmenas:', error);
+        console.error('Error details:', error.message);
+        res.status(500).json({ 
+            error: 'Error obteniendo colmenas',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 
-    app.post('/api/colmenas', async (req, res) => {
-        let connection;
+    // REEMPLAZAR el endpoint existente app.post('/api/colmenas') con:
+app.post('/api/colmenas', async (req, res) => {
+    let connection;
+    try {
+        console.log('➕ Creando nueva colmena con datos:', req.body);
+        
+        const { descripcion, latitud, longitud, dueno, nodo_interior, nodo_exterior } = req.body;
+        
+        // Validar campos requeridos según el nuevo esquema
+        if (!descripcion || !latitud || !longitud || !dueno) {
+            return res.status(400).json({ 
+                error: 'Descripción, latitud, longitud y dueño son obligatorios' 
+            });
+        }
+        
+        connection = await pool.getConnection();
+        
+        // Verificar que el dueño existe
+        const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
+        if (duenoExists.length === 0) {
+            return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
+        }
+        
+        // Validar nodos si se proporcionan
+        if (nodo_interior) {
+            const [nodoIntExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_interior]);
+            if (nodoIntExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo interior especificado no existe' });
+            }
+            
+            // Verificar que no esté ya asignado
+            const [nodoIntAsignado] = await connection.execute('SELECT colmena_id FROM nodo_colmena WHERE nodo_id = ?', [nodo_interior]);
+            if (nodoIntAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo interior ya está asignado a otra colmena' });
+            }
+        }
+        
+        if (nodo_exterior) {
+            const [nodoExtExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_exterior]);
+            if (nodoExtExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo exterior especificado no existe' });
+            }
+            
+            // Verificar que no esté ya asignado
+            const [nodoExtAsignado] = await connection.execute('SELECT estacion_id FROM nodo_estacion WHERE nodo_id = ?', [nodo_exterior]);
+            if (nodoExtAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo exterior ya está asignado a otra estación' });
+            }
+        }
+        
+        // Validar coordenadas
+        const lat = parseFloat(latitud);
+        const lng = parseFloat(longitud);
+        
+        if (isNaN(lat) || lat < -90 || lat > 90) {
+            return res.status(400).json({ error: 'La latitud debe ser un número entre -90 y 90' });
+        }
+        
+        if (isNaN(lng) || lng < -180 || lng > 180) {
+            return res.status(400).json({ error: 'La longitud debe ser un número entre -180 y 180' });
+        }
+        
+        // Generar ID único para la colmena
+        const colmenaId = `COL-${Date.now().toString()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+        
+        // Iniciar transacción
+        await connection.beginTransaction();
+        
         try {
-            console.log('➕ Creando nueva colmena con datos:', req.body);
-            
-            const { descripcion, latitud, longitud, dueno } = req.body;
-            
-            // Validar campos requeridos según el nuevo esquema
-            if (!descripcion || !latitud || !longitud || !dueno) {
-                return res.status(400).json({ 
-                    error: 'Descripción, latitud, longitud y dueño son obligatorios' 
-                });
-            }
-            
-            connection = await pool.getConnection();
-            
-            // Verificar que el dueño existe
-            const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
-            if (duenoExists.length === 0) {
-                return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
-            }
-            
-            // Validar coordenadas
-            const lat = parseFloat(latitud);
-            const lng = parseFloat(longitud);
-            
-            if (isNaN(lat) || lat < -90 || lat > 90) {
-                return res.status(400).json({ error: 'La latitud debe ser un número entre -90 y 90' });
-            }
-            
-            if (isNaN(lng) || lng < -180 || lng > 180) {
-                return res.status(400).json({ error: 'La longitud debe ser un número entre -180 y 180' });
-            }
-            
-            // Generar ID único para la colmena
-            const colmenaId = `COL-${Date.now().toString()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
-            
-            // Insertar nueva colmena según el nuevo esquema
+            // Insertar nueva colmena
             await connection.execute(`
                 INSERT INTO colmena (id, descripcion, latitud, longitud, dueno) 
                 VALUES (?, ?, ?, ?, ?)
             `, [colmenaId, descripcion.trim(), lat, lng, dueno]);
             
+            // Asignar nodo interior si se proporcionó
+            if (nodo_interior) {
+                await connection.execute(`
+                    INSERT INTO nodo_colmena (colmena_id, nodo_id) 
+                    VALUES (?, ?)
+                `, [colmenaId, nodo_interior]);
+            }
+            
+            // Asignar nodo exterior si se proporcionó
+            if (nodo_exterior) {
+                await connection.execute(`
+                    INSERT INTO nodo_estacion (estacion_id, nodo_id) 
+                    VALUES (?, ?)
+                `, [colmenaId, nodo_exterior]);
+            }
+            
+            await connection.commit();
             console.log('✅ Colmena creada exitosamente:', colmenaId);
             
             res.status(201).json({
@@ -802,19 +865,147 @@
                 latitud: lat,
                 longitud: lng,
                 dueno: dueno,
+                nodo_interior: nodo_interior || null,
+                nodo_exterior: nodo_exterior || null,
                 message: 'Colmena creada exitosamente'
             });
             
         } catch (error) {
-            console.error('💥 Error creando colmena:', error);
-            res.status(500).json({ 
-                error: 'Error creando colmena',
-                details: error.message 
-            });
-        } finally {
-            if (connection) connection.release();
+            await connection.rollback();
+            throw error;
         }
-    });
+        
+    } catch (error) {
+        console.error('💥 Error creando colmena:', error);
+        res.status(500).json({ 
+            error: 'Error creando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// AGREGAR después del endpoint POST /api/colmenas:
+app.put('/api/colmenas/:id', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        const { descripcion, latitud, longitud, dueno, nodo_interior, nodo_exterior } = req.body;
+        
+        console.log(`✏️ Actualizando colmena ${id}:`, req.body);
+        
+        connection = await pool.getConnection();
+        
+        // Verificar que la colmena existe
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        if (colmenaExists.length === 0) {
+            return res.status(404).json({ error: 'Colmena no encontrada' });
+        }
+        
+        // Validar campos requeridos
+        if (!descripcion || !dueno) {
+            return res.status(400).json({ 
+                error: 'Descripción y dueño son obligatorios' 
+            });
+        }
+        
+        // Verificar que el dueño existe
+        const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
+        if (duenoExists.length === 0) {
+            return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
+        }
+        
+        // Validar nodos si se proporcionan
+        if (nodo_interior) {
+            const [nodoIntExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_interior]);
+            if (nodoIntExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo interior especificado no existe' });
+            }
+            
+            // Verificar que no esté asignado a otra colmena
+            const [nodoIntAsignado] = await connection.execute('SELECT colmena_id FROM nodo_colmena WHERE nodo_id = ? AND colmena_id != ?', [nodo_interior, id]);
+            if (nodoIntAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo interior ya está asignado a otra colmena' });
+            }
+        }
+        
+        if (nodo_exterior) {
+            const [nodoExtExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_exterior]);
+            if (nodoExtExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo exterior especificado no existe' });
+            }
+            
+            // Verificar que no esté asignado a otra estación
+            const [nodoExtAsignado] = await connection.execute('SELECT estacion_id FROM nodo_estacion WHERE nodo_id = ? AND estacion_id != ?', [nodo_exterior, id]);
+            if (nodoExtAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo exterior ya está asignado a otra estación' });
+            }
+        }
+        
+        // Iniciar transacción
+        await connection.beginTransaction();
+        
+        try {
+            // Actualizar colmena
+            let updateQuery = 'UPDATE colmena SET descripcion = ?, dueno = ?';
+            let updateParams = [descripcion.trim(), dueno];
+            
+            if (latitud && longitud) {
+                const lat = parseFloat(latitud);
+                const lng = parseFloat(longitud);
+                
+                if (isNaN(lat) || lat < -90 || lat > 90) {
+                    throw new Error('La latitud debe ser un número entre -90 y 90');
+                }
+                
+                if (isNaN(lng) || lng < -180 || lng > 180) {
+                    throw new Error('La longitud debe ser un número entre -180 y 180');
+                }
+                
+                updateQuery += ', latitud = ?, longitud = ?';
+                updateParams.push(lat, lng);
+            }
+            
+            updateQuery += ' WHERE id = ?';
+            updateParams.push(id);
+            
+            await connection.execute(updateQuery, updateParams);
+            
+            // Actualizar nodo interior
+            await connection.execute('DELETE FROM nodo_colmena WHERE colmena_id = ?', [id]);
+            if (nodo_interior) {
+                await connection.execute('INSERT INTO nodo_colmena (colmena_id, nodo_id) VALUES (?, ?)', [id, nodo_interior]);
+            }
+            
+            // Actualizar nodo exterior
+            await connection.execute('DELETE FROM nodo_estacion WHERE estacion_id = ?', [id]);
+            if (nodo_exterior) {
+                await connection.execute('INSERT INTO nodo_estacion (estacion_id, nodo_id) VALUES (?, ?)', [id, nodo_exterior]);
+            }
+            
+            await connection.commit();
+            console.log('✅ Colmena actualizada:', id);
+            
+            res.json({ 
+                message: 'Colmena actualizada correctamente',
+                id: id
+            });
+            
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        }
+        
+    } catch (error) {
+        console.error('💥 Error actualizando colmena:', error);
+        res.status(500).json({ 
+            error: 'Error actualizando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
     // =============================================
     // RUTAS PARA ESTACIONES (NUEVO)
     // =============================================
@@ -882,6 +1073,7 @@
             if (connection) connection.release();
         }
     });
+    
     // =============================================
     // RUTAS PARA NODOS - CORREGIDAS PARA ESQUEMA REAL
     // =============================================
@@ -945,6 +1137,67 @@
             if (connection) connection.release();
         }
     });
+    // =============================================
+// RUTAS PARA OBTENER NODOS DISPONIBLES
+// =============================================
+
+// Obtener nodos interiores disponibles (que no estén asignados a otras colmenas)
+app.get('/api/nodos/interiores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔌 Obteniendo nodos interiores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_colmena nc ON n.id = nc.nodo_id
+            WHERE nc.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos interiores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos interiores disponibles:', error);
+        res.status(500).json({ error: 'Error obteniendo nodos interiores disponibles' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener nodos exteriores disponibles (que no estén asignados a otras estaciones)
+app.get('/api/nodos/exteriores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🌡️ Obteniendo nodos exteriores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_estacion ne ON n.id = ne.nodo_id
+            WHERE ne.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos exteriores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos exteriores disponibles:', error);
+        res.status(500).json({ error: 'Error obteniendo nodos exteriores disponibles' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
     // =============================================
     // RUTAS PARA NODO_MENSAJE - DATOS REALES
     // =============================================
@@ -1292,9 +1545,201 @@
     // =============================================
     // RUTAS PARA DASHBOARD - CORREGIDAS
     // =============================================
-// Agregar este endpoint en server.js si no existe:
-// Agregar esta ruta en server.js después de las otras rutas de colmenas
+// Agregar estos endpoints de debug en tu server.js para verificar los datos
 
+// Endpoint para ver los datos más recientes RAW de la base de datos
+app.get('/api/debug/latest-raw-data', async (req, res) => {
+    let connection;
+    try {
+        const limit = parseInt(req.query.limit) || 20;
+        
+        console.log(`🔍 Obteniendo los últimos ${limit} datos RAW de la base de datos...`);
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT id, nodo_id, topico, payload, fecha,
+                DATE_FORMAT(fecha, '%Y-%m-%d %H:%i:%s') as fecha_formateada
+            FROM nodo_mensaje 
+            ORDER BY fecha DESC 
+            LIMIT ?
+        `, [limit]);
+        
+        console.log(`✅ Datos RAW obtenidos: ${rows.length}`);
+        
+        res.json({
+            total: rows.length,
+            timestamp: new Date().toISOString(),
+            datos: rows.map(row => ({
+                id: row.id,
+                nodo_id: row.nodo_id,
+                topico: row.topico,
+                payload: row.payload,
+                fecha_original: row.fecha,
+                fecha_formateada: row.fecha_formateada,
+                payload_parsed: (() => {
+                    try {
+                        return JSON.parse(row.payload);
+                    } catch (e) {
+                        return { error: 'Invalid JSON', raw: row.payload };
+                    }
+                })()
+            }))
+        });
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo datos RAW:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo datos RAW',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Endpoint para verificar específicamente los nodos que nos interesan
+app.get('/api/debug/target-nodes-data', async (req, res) => {
+    let connection;
+    try {
+        const limit = parseInt(req.query.limit) || 10;
+        const nodoInterno = 'NODO-BEF8C985-0FF3-4874-935B-40AA8A235FF7';
+        const nodoExterno = 'NODO-B5B3ABC4-E0CE-4662-ACB3-7A631C12394A';
+        
+        console.log(`🎯 Verificando datos de nodos específicos (últimos ${limit})...`);
+        
+        connection = await pool.getConnection();
+        
+        // Datos del nodo interno
+        const [datosInternos] = await connection.execute(`
+            SELECT id, nodo_id, payload, fecha,
+                DATE_FORMAT(fecha, '%Y-%m-%d %H:%i:%s') as fecha_formateada
+            FROM nodo_mensaje 
+            WHERE nodo_id = ?
+            ORDER BY fecha DESC 
+            LIMIT ?
+        `, [nodoInterno, limit]);
+        
+        // Datos del nodo externo
+        const [datosExternos] = await connection.execute(`
+            SELECT id, nodo_id, payload, fecha,
+                DATE_FORMAT(fecha, '%Y-%m-%d %H:%i:%s') as fecha_formateada
+            FROM nodo_mensaje 
+            WHERE nodo_id = ?
+            ORDER BY fecha DESC 
+            LIMIT ?
+        `, [nodoExterno, limit]);
+        
+        console.log(`✅ Nodo interno: ${datosInternos.length} registros`);
+        console.log(`✅ Nodo externo: ${datosExternos.length} registros`);
+        
+        res.json({
+            timestamp: new Date().toISOString(),
+            nodos: {
+                interno: {
+                    nodo_id: nodoInterno,
+                    total: datosInternos.length,
+                    datos: datosInternos.map(row => ({
+                        id: row.id,
+                        fecha_formateada: row.fecha_formateada,
+                        payload_parsed: (() => {
+                            try {
+                                return JSON.parse(row.payload);
+                            } catch (e) {
+                                return { error: 'Invalid JSON' };
+                            }
+                        })()
+                    }))
+                },
+                externo: {
+                    nodo_id: nodoExterno,
+                    total: datosExternos.length,
+                    datos: datosExternos.map(row => ({
+                        id: row.id,
+                        fecha_formateada: row.fecha_formateada,
+                        payload_parsed: (() => {
+                            try {
+                                return JSON.parse(row.payload);
+                            } catch (e) {
+                                return { error: 'Invalid JSON' };
+                            }
+                        })()
+                    }))
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('💥 Error verificando nodos específicos:', error);
+        res.status(500).json({ 
+            error: 'Error verificando nodos específicos',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Endpoint para insertar un dato de prueba y verificar que se actualiza
+app.post('/api/debug/insert-test-data', async (req, res) => {
+    let connection;
+    try {
+        console.log('🧪 Insertando dato de prueba...');
+        
+        connection = await pool.getConnection();
+        
+        const nodoInterno = 'NODO-BEF8C985-0FF3-4874-935B-40AA8A235FF7';
+        const testTopico = `SmartBee/nodes/${nodoInterno}/data`;
+        
+        const testPayload = {
+            nodo_id: nodoInterno,
+            temperatura: (15 + Math.random() * 25).toFixed(1),
+            humedad: (40 + Math.random() * 50).toFixed(1),
+            peso: (1000 + Math.random() * 500).toFixed(0),
+            timestamp: new Date().toISOString(),
+            test_data: true
+        };
+        
+        const payloadJson = JSON.stringify(testPayload);
+        
+        const [result] = await connection.execute(`
+            INSERT INTO nodo_mensaje (nodo_id, topico, payload) 
+            VALUES (?, ?, ?)
+        `, [nodoInterno, testTopico, payloadJson]);
+        
+        console.log('✅ Dato de prueba insertado con ID:', result.insertId);
+        
+        // Verificar que se insertó correctamente
+        const [verification] = await connection.execute(`
+            SELECT id, fecha, payload 
+            FROM nodo_mensaje 
+            WHERE id = ?
+        `, [result.insertId]);
+        
+        res.json({
+            success: true,
+            insertId: result.insertId,
+            timestamp: new Date().toISOString(),
+            payload: testPayload,
+            verification: verification[0] ? {
+                id: verification[0].id,
+                fecha: verification[0].fecha,
+                payload_parsed: JSON.parse(verification[0].payload)
+            } : null,
+            message: 'Dato de prueba insertado. El dashboard debería actualizarse en 10 segundos.'
+        });
+        
+    } catch (error) {
+        console.error('💥 Error insertando dato de prueba:', error);
+        res.status(500).json({ 
+            error: 'Error insertando dato de prueba',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// REEMPLAZAR el endpoint existente con:
 app.get('/api/colmenas/dueno/:duenoId', async (req, res) => {
     let connection;
     try {
@@ -1306,14 +1751,22 @@ app.get('/api/colmenas/dueno/:duenoId', async (req, res) => {
         
         const [colmenas] = await connection.execute(`
             SELECT c.id, c.descripcion, c.latitud, c.longitud, c.dueno,
-                u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna
+                u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna,
+                nc.nodo_id as nodo_interior_id,
+                n_interior.descripcion as nodo_interior_descripcion,
+                ne.nodo_id as nodo_exterior_id,
+                n_exterior.descripcion as nodo_exterior_descripcion
             FROM colmena c
             LEFT JOIN usuario u ON c.dueno = u.id
+            LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+            LEFT JOIN nodo n_interior ON nc.nodo_id = n_interior.id
+            LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+            LEFT JOIN nodo n_exterior ON ne.nodo_id = n_exterior.id
             WHERE c.dueno = ?
             ORDER BY c.id ASC
         `, [duenoId]);
         
-        // Formatear para compatibilidad con frontend
+        // Formatear incluyendo nodos
         const colmenasFormateadas = colmenas.map(colmena => ({
             id: colmena.id,
             nombre: `Colmena ${colmena.id}`,
@@ -1329,7 +1782,12 @@ app.get('/api/colmenas/dueno/:duenoId', async (req, res) => {
             latitud: colmena.latitud,
             longitud: colmena.longitud,
             ubicacion: colmena.latitud && colmena.longitud ? `${colmena.latitud}, ${colmena.longitud}` : null,
-            comuna: colmena.dueno_comuna
+            comuna: colmena.dueno_comuna,
+            // NUEVOS CAMPOS
+            nodo_interior_id: colmena.nodo_interior_id,
+            nodo_interior_descripcion: colmena.nodo_interior_descripcion,
+            nodo_exterior_id: colmena.nodo_exterior_id,
+            nodo_exterior_descripcion: colmena.nodo_exterior_descripcion
         }));
         
         console.log(`✅ Colmenas del dueño ${duenoId} obtenidas:`, colmenasFormateadas.length);

@@ -2380,13 +2380,13 @@ app.get('/api/debug/nodos-data', async (req, res) => {
             if (connection) connection.release();
         }
     });
-    // Nuevo endpoint para datos específicos del dashboard
-// REEMPLAZAR el endpoint existente con esta versión dinámica por usuario:
+// REEMPLAZAR el endpoint existente app.get('/api/dashboard/sensor-data') con esta versión mejorada:
+
 app.get('/api/dashboard/sensor-data', async (req, res) => {
     let connection;
     try {
         const hours = Math.min(parseInt(req.query.hours) || 168, 720); // Máximo 30 días
-        const userId = req.query.userId; // ✅ NUEVO: Recibir ID del usuario
+        const userId = req.query.userId; // ✅ REQUERIDO: ID del usuario
         
         if (!userId) {
             return res.status(400).json({ 
@@ -2398,50 +2398,106 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
         
         connection = await pool.getConnection();
         
-        // ✅ PASO 1: Obtener todas las colmenas del usuario
-        const [colmenasUsuario] = await connection.execute(`
-            SELECT id FROM colmena WHERE dueno = ?
+        // ✅ PASO 1: Verificar que el usuario existe y está activo
+        const [usuarioExists] = await connection.execute(`
+            SELECT id, nombre, apellido FROM usuario WHERE id = ? AND activo = 1
         `, [userId]);
         
-        if (colmenasUsuario.length === 0) {
+        if (usuarioExists.length === 0) {
+            return res.status(404).json({
+                error: 'Usuario no encontrado o inactivo'
+            });
+        }
+        
+        // ✅ PASO 2: Obtener colmenas del usuario con sus nodos asociados Y que tengan datos recientes
+        const [colmenasConNodos] = await connection.execute(`
+            SELECT DISTINCT 
+                c.id as colmena_id,
+                c.descripcion as colmena_descripcion,
+                c.latitud,
+                c.longitud,
+                nc.nodo_id as nodo_interior_id,
+                n_interior.descripcion as nodo_interior_descripcion,
+                ne.nodo_id as nodo_exterior_id,
+                n_exterior.descripcion as nodo_exterior_descripcion,
+                -- Contar mensajes recientes de cada nodo
+                (SELECT COUNT(*) FROM nodo_mensaje nm_int 
+                 WHERE nm_int.nodo_id = nc.nodo_id 
+                 AND nm_int.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)) as mensajes_interior,
+                (SELECT COUNT(*) FROM nodo_mensaje nm_ext 
+                 WHERE nm_ext.nodo_id = ne.nodo_id 
+                 AND nm_ext.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)) as mensajes_exterior
+            FROM colmena c
+            LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+            LEFT JOIN nodo n_interior ON nc.nodo_id = n_interior.id
+            LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+            LEFT JOIN nodo n_exterior ON ne.nodo_id = n_exterior.id
+            WHERE c.dueno = ?
+            AND (
+                (nc.nodo_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM nodo_mensaje nm1 
+                    WHERE nm1.nodo_id = nc.nodo_id 
+                    AND nm1.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+                ))
+                OR 
+                (ne.nodo_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM nodo_mensaje nm2 
+                    WHERE nm2.nodo_id = ne.nodo_id 
+                    AND nm2.fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+                ))
+            )
+            ORDER BY c.id ASC
+        `, [hours, hours, userId, hours]);
+        
+        console.log(`✅ Colmenas del usuario con nodos activos: ${colmenasConNodos.length}`);
+        
+        if (colmenasConNodos.length === 0) {
+            // Verificar si tiene colmenas sin nodos o con nodos sin datos
+            const [todasLasColmenas] = await connection.execute(`
+                SELECT COUNT(*) as total FROM colmena WHERE dueno = ?
+            `, [userId]);
+            
+            const [colmenasConNodosSinDatos] = await connection.execute(`
+                SELECT COUNT(DISTINCT c.id) as total 
+                FROM colmena c
+                LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+                LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+                WHERE c.dueno = ? AND (nc.nodo_id IS NOT NULL OR ne.nodo_id IS NOT NULL)
+            `, [userId]);
+            
+            let message = 'No tienes colmenas con datos disponibles';
+            if (todasLasColmenas[0].total === 0) {
+                message = 'No tienes colmenas registradas';
+            } else if (colmenasConNodosSinDatos[0].total === 0) {
+                message = `Tienes ${todasLasColmenas[0].total} colmenas pero ninguna tiene nodos asignados`;
+            } else {
+                message = `Tienes colmenas con nodos asignados pero sin datos en las últimas ${hours} horas`;
+            }
+            
             return res.json({
                 internos: [],
                 externos: [],
                 combinados: [],
-                nodos: { interno: null, externo: null },
-                message: 'El usuario no tiene colmenas registradas',
-                colmenasCount: 0
+                nodos: { interior: [], exterior: [] },
+                message: message,
+                colmenasCount: todasLasColmenas[0].total,
+                colmenasConNodosActivos: 0,
+                userId: userId
             });
         }
         
-        console.log(`✅ Usuario tiene ${colmenasUsuario.length} colmenas`);
+        // ✅ PASO 3: Obtener SOLO los nodos que tienen datos recientes
+        const nodosInteriores = colmenasConNodos
+            .filter(c => c.nodo_interior_id && c.mensajes_interior > 0)
+            .map(c => c.nodo_interior_id);
+            
+        const nodosExteriores = colmenasConNodos
+            .filter(c => c.nodo_exterior_id && c.mensajes_exterior > 0)
+            .map(c => c.nodo_exterior_id);
         
-        // ✅ PASO 2: Obtener nodos interiores (de las colmenas del usuario)
-        const colmenaIds = colmenasUsuario.map(c => c.id);
-        const placeholders = colmenaIds.map(() => '?').join(',');
+        const todosLosNodos = [...nodosInteriores, ...nodosExteriores];
         
-        const [nodosInteriores] = await connection.execute(`
-            SELECT DISTINCT nc.nodo_id, nc.colmena_id, c.descripcion as colmena_descripcion
-            FROM nodo_colmena nc
-            INNER JOIN colmena c ON nc.colmena_id = c.id
-            WHERE nc.colmena_id IN (${placeholders})
-        `, colmenaIds);
-        
-        // ✅ PASO 3: Obtener nodos exteriores (estaciones asociadas a las colmenas del usuario)
-        const [nodosExteriores] = await connection.execute(`
-            SELECT DISTINCT ne.nodo_id, ne.estacion_id, e.descripcion as estacion_descripcion
-            FROM nodo_estacion ne
-            INNER JOIN estacion e ON ne.estacion_id = e.id
-            WHERE ne.estacion_id IN (${placeholders})
-        `, colmenaIds);
-        
-        console.log(`✅ Nodos encontrados - Interiores: ${nodosInteriores.length}, Exteriores: ${nodosExteriores.length}`);
-        
-        // ✅ PASO 4: Si no hay nodos, devolver respuesta vacía
-        const todosLosNodos = [
-            ...nodosInteriores.map(n => n.nodo_id),
-            ...nodosExteriores.map(n => n.nodo_id)
-        ];
+        console.log(`📊 Nodos con datos: Interior(${nodosInteriores.length}), Exterior(${nodosExteriores.length})`);
         
         if (todosLosNodos.length === 0) {
             return res.json({
@@ -2449,12 +2505,14 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
                 externos: [],
                 combinados: [],
                 nodos: { interior: [], exterior: [] },
-                message: 'Las colmenas del usuario no tienen nodos asignados',
-                colmenasCount: colmenasUsuario.length
+                message: 'Las colmenas tienen nodos asignados pero sin datos recientes',
+                colmenasCount: colmenasConNodos.length,
+                colmenasConNodosActivos: 0,
+                userId: userId
             });
         }
         
-        // ✅ PASO 5: Obtener mensajes de TODOS los nodos del usuario
+        // ✅ PASO 4: Obtener mensajes SOLO de los nodos que pertenecen al usuario y tienen datos
         const nodosPlaceholders = todosLosNodos.map(() => '?').join(',');
         
         const query = `
@@ -2468,7 +2526,7 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
         
         const [rows] = await connection.execute(query, [...todosLosNodos, hours]);
         
-        console.log(`✅ Datos obtenidos: ${rows.length} registros de ${todosLosNodos.length} nodos`);
+        console.log(`✅ Mensajes obtenidos: ${rows.length} de ${todosLosNodos.length} nodos del usuario`);
         
         if (rows.length === 0) {
             return res.json({
@@ -2476,15 +2534,31 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
                 externos: [],
                 combinados: [],
                 nodos: { 
-                    interior: nodosInteriores.map(n => ({ id: n.nodo_id, colmena: n.colmena_descripcion })),
-                    exterior: nodosExteriores.map(n => ({ id: n.nodo_id, estacion: n.estacion_descripcion }))
+                    interior: nodosInteriores.map(nodoId => {
+                        const colmena = colmenasConNodos.find(c => c.nodo_interior_id === nodoId);
+                        return { 
+                            id: nodoId, 
+                            colmena_id: colmena?.colmena_id,
+                            colmena_descripcion: colmena?.colmena_descripcion 
+                        };
+                    }),
+                    exterior: nodosExteriores.map(nodoId => {
+                        const colmena = colmenasConNodos.find(c => c.nodo_exterior_id === nodoId);
+                        return { 
+                            id: nodoId, 
+                            colmena_id: colmena?.colmena_id,
+                            colmena_descripcion: colmena?.colmena_descripcion 
+                        };
+                    })
                 },
                 message: 'No hay datos disponibles para el período solicitado',
-                colmenasCount: colmenasUsuario.length
+                colmenasCount: colmenasConNodos.length,
+                colmenasConNodosActivos: colmenasConNodos.length,
+                userId: userId
             });
         }
         
-        // ✅ PASO 6: Procesar y clasificar los datos
+        // ✅ PASO 5: Procesar y clasificar los datos
         const datosFormateados = rows.map(row => {
             let payload = {};
             try {
@@ -2494,9 +2568,13 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
                 return null;
             }
             
-            // Determinar si es nodo interior o exterior
-            const esInterior = nodosInteriores.find(n => n.nodo_id === row.nodo_id);
-            const esExterior = nodosExteriores.find(n => n.nodo_id === row.nodo_id);
+            // Determinar tipo de nodo y colmena asociada
+            const esInterior = nodosInteriores.includes(row.nodo_id);
+            const esExterior = nodosExteriores.includes(row.nodo_id);
+            
+            const colmenaInfo = colmenasConNodos.find(c => 
+                c.nodo_interior_id === row.nodo_id || c.nodo_exterior_id === row.nodo_id
+            );
             
             return {
                 id: row.id,
@@ -2506,10 +2584,8 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
                 humedad: parseFloat(payload.humedad) || null,
                 peso: parseFloat(payload.peso) || null,
                 tipo: esInterior ? 'interno' : 'externo',
-                colmena_id: esInterior ? esInterior.colmena_id : null,
-                estacion_id: esExterior ? esExterior.estacion_id : null,
-                colmena_descripcion: esInterior ? esInterior.colmena_descripcion : null,
-                estacion_descripcion: esExterior ? esExterior.estacion_descripcion : null
+                colmena_id: colmenaInfo?.colmena_id || null,
+                colmena_descripcion: colmenaInfo?.colmena_descripcion || null
             };
         }).filter(item => item !== null);
         
@@ -2517,33 +2593,183 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
         const datosInternos = datosFormateados.filter(d => d.tipo === 'interno');
         const datosExternos = datosFormateados.filter(d => d.tipo === 'externo');
         
+        console.log(`📊 Datos procesados: ${datosInternos.length} internos, ${datosExternos.length} externos`);
+        
         res.json({
             internos: datosInternos,
             externos: datosExternos,
             combinados: datosFormateados,
             nodos: {
-                interior: nodosInteriores.map(n => ({ 
-                    id: n.nodo_id, 
-                    colmena_id: n.colmena_id,
-                    colmena_descripcion: n.colmena_descripcion 
-                })),
-                exterior: nodosExteriores.map(n => ({ 
-                    id: n.nodo_id, 
-                    estacion_id: n.estacion_id,
-                    estacion_descripcion: n.estacion_descripcion 
-                }))
+                interior: nodosInteriores.map(nodoId => {
+                    const colmena = colmenasConNodos.find(c => c.nodo_interior_id === nodoId);
+                    return { 
+                        id: nodoId, 
+                        colmena_id: colmena?.colmena_id,
+                        colmena_descripcion: colmena?.colmena_descripcion,
+                        mensajes_recientes: colmena?.mensajes_interior || 0
+                    };
+                }),
+                exterior: nodosExteriores.map(nodoId => {
+                    const colmena = colmenasConNodos.find(c => c.nodo_exterior_id === nodoId);
+                    return { 
+                        id: nodoId, 
+                        colmena_id: colmena?.colmena_id,
+                        colmena_descripcion: colmena?.colmena_descripcion,
+                        mensajes_recientes: colmena?.mensajes_exterior || 0
+                    };
+                })
             },
             totalRegistros: datosFormateados.length,
             horasConsultadas: hours,
-            colmenasCount: colmenasUsuario.length,
-            nodosCount: todosLosNodos.length,
-            userId: userId
+            colmenasCount: colmenasConNodos.length,
+            colmenasConNodosActivos: colmenasConNodos.length,
+            nodosActivosCount: todosLosNodos.length,
+            userId: userId,
+            resumen: {
+                nodosInterioresActivos: nodosInteriores.length,
+                nodosExterioresActivos: nodosExteriores.length,
+                colmenasConDatos: [...new Set(datosFormateados.map(d => d.colmena_id))].length
+            }
         });
         
     } catch (error) {
         console.error('💥 Error obteniendo datos del dashboard:', error);
         res.status(500).json({ 
             error: 'Error obteniendo datos del dashboard',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// AGREGAR este endpoint en server.js para debugging:
+
+app.get('/api/debug/user-nodes-data/:userId', async (req, res) => {
+    let connection;
+    try {
+        const { userId } = req.params;
+        const hours = parseInt(req.query.hours) || 24;
+        
+        console.log(`🔍 Debug: Verificando nodos del usuario ${userId}...`);
+        
+        connection = await pool.getConnection();
+        
+        // 1. Verificar que el usuario existe
+        const [usuario] = await connection.execute(`
+            SELECT id, nombre, apellido FROM usuario WHERE id = ? AND activo = 1
+        `, [userId]);
+        
+        if (usuario.length === 0) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+        
+        // 2. Obtener todas las colmenas del usuario
+        const [colmenas] = await connection.execute(`
+            SELECT id, descripcion FROM colmena WHERE dueno = ?
+        `, [userId]);
+        
+        // 3. Obtener nodos asignados a las colmenas del usuario
+        const [nodosAsignados] = await connection.execute(`
+            SELECT 
+                c.id as colmena_id,
+                c.descripcion as colmena_descripcion,
+                nc.nodo_id as nodo_interior,
+                ne.nodo_id as nodo_exterior,
+                n1.descripcion as descripcion_interior,
+                n2.descripcion as descripcion_exterior
+            FROM colmena c
+            LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+            LEFT JOIN nodo n1 ON nc.nodo_id = n1.id
+            LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+            LEFT JOIN nodo n2 ON ne.nodo_id = n2.id
+            WHERE c.dueno = ?
+        `, [userId]);
+        
+        // 4. Para cada nodo, verificar cuántos mensajes tiene
+        const nodosConDatos = [];
+        
+        for (const asignacion of nodosAsignados) {
+            if (asignacion.nodo_interior) {
+                const [mensajesInt] = await connection.execute(`
+                    SELECT COUNT(*) as total,
+                           MAX(fecha) as ultimo_mensaje,
+                           MIN(fecha) as primer_mensaje
+                    FROM nodo_mensaje 
+                    WHERE nodo_id = ? AND fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+                `, [asignacion.nodo_interior, hours]);
+                
+                nodosConDatos.push({
+                    tipo: 'interior',
+                    nodo_id: asignacion.nodo_interior,
+                    nodo_descripcion: asignacion.descripcion_interior,
+                    colmena_id: asignacion.colmena_id,
+                    colmena_descripcion: asignacion.colmena_descripcion,
+                    mensajes_periodo: mensajesInt[0].total,
+                    ultimo_mensaje: mensajesInt[0].ultimo_mensaje,
+                    primer_mensaje: mensajesInt[0].primer_mensaje
+                });
+            }
+            
+            if (asignacion.nodo_exterior) {
+                const [mensajesExt] = await connection.execute(`
+                    SELECT COUNT(*) as total,
+                           MAX(fecha) as ultimo_mensaje,
+                           MIN(fecha) as primer_mensaje
+                    FROM nodo_mensaje 
+                    WHERE nodo_id = ? AND fecha >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+                `, [asignacion.nodo_exterior, hours]);
+                
+                nodosConDatos.push({
+                    tipo: 'exterior',
+                    nodo_id: asignacion.nodo_exterior,
+                    nodo_descripcion: asignacion.descripcion_exterior,
+                    colmena_id: asignacion.colmena_id,
+                    colmena_descripcion: asignacion.colmena_descripcion,
+                    mensajes_periodo: mensajesExt[0].total,
+                    ultimo_mensaje: mensajesExt[0].ultimo_mensaje,
+                    primer_mensaje: mensajesExt[0].primer_mensaje
+                });
+            }
+        }
+        
+        // 5. Obtener sample de mensajes recientes
+        const nodosActivos = nodosConDatos.filter(n => n.mensajes_periodo > 0);
+        const sampleMensajes = [];
+        
+        for (const nodo of nodosActivos.slice(0, 3)) { // Solo primeros 3 para no saturar
+            const [sample] = await connection.execute(`
+                SELECT id, topico, payload, fecha
+                FROM nodo_mensaje 
+                WHERE nodo_id = ? 
+                ORDER BY fecha DESC 
+                LIMIT 3
+            `, [nodo.nodo_id]);
+            
+            sampleMensajes.push({
+                nodo_id: nodo.nodo_id,
+                mensajes: sample
+            });
+        }
+        
+        res.json({
+            usuario: usuario[0],
+            resumen: {
+                colmenas_total: colmenas.length,
+                nodos_asignados: nodosAsignados.filter(n => n.nodo_interior || n.nodo_exterior).length,
+                nodos_con_datos: nodosActivos.length,
+                total_mensajes_periodo: nodosConDatos.reduce((sum, n) => sum + n.mensajes_periodo, 0)
+            },
+            colmenas: colmenas,
+            nodos_detalle: nodosConDatos,
+            nodos_activos: nodosActivos,
+            sample_mensajes: sampleMensajes,
+            periodo_horas: hours
+        });
+        
+    } catch (error) {
+        console.error('💥 Error en debug user nodes:', error);
+        res.status(500).json({ 
+            error: 'Error verificando nodos del usuario',
             details: error.message 
         });
     } finally {

@@ -2058,6 +2058,191 @@ app.get('/api/dashboard/sensor-data', async (req, res) => {
         if (connection) connection.release();
     }
 });
+// =============================================
+// AGREGAR ESTE ENDPOINT PUT PARA ACTUALIZAR COLMENAS
+// =============================================
+
+app.put('/api/colmenas/:id', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        const { descripcion, latitud, longitud, dueno, nodo_interior, nodo_exterior } = req.body;
+        
+        console.log(`✏️ Actualizando colmena ${id}:`, req.body);
+        
+        connection = await pool.getConnection();
+        
+        // Verificar que la colmena existe
+        const [colmenaExists] = await connection.execute('SELECT id FROM colmena WHERE id = ?', [id]);
+        if (colmenaExists.length === 0) {
+            return res.status(404).json({ error: 'Colmena no encontrada' });
+        }
+        
+        // Validar campos requeridos
+        if (!descripcion || !dueno) {
+            return res.status(400).json({ 
+                error: 'Descripción y dueño son obligatorios' 
+            });
+        }
+        
+        // Verificar que el dueño existe
+        const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
+        if (duenoExists.length === 0) {
+            return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
+        }
+        
+        // Validar nodos si se proporcionan
+        if (nodo_interior) {
+            const [nodoIntExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_interior]);
+            if (nodoIntExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo interior especificado no existe' });
+            }
+            
+            // Verificar que no esté asignado a otra colmena
+            const [nodoIntAsignado] = await connection.execute('SELECT colmena_id FROM nodo_colmena WHERE nodo_id = ? AND colmena_id != ?', [nodo_interior, id]);
+            if (nodoIntAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo interior ya está asignado a otra colmena' });
+            }
+        }
+        
+        if (nodo_exterior) {
+            const [nodoExtExists] = await connection.execute('SELECT id FROM nodo WHERE id = ?', [nodo_exterior]);
+            if (nodoExtExists.length === 0) {
+                return res.status(400).json({ error: 'El nodo exterior especificado no existe' });
+            }
+            
+            // Verificar que no esté asignado a otra estación
+            const [nodoExtAsignado] = await connection.execute('SELECT estacion_id FROM nodo_estacion WHERE nodo_id = ? AND estacion_id != ?', [nodo_exterior, id]);
+            if (nodoExtAsignado.length > 0) {
+                return res.status(400).json({ error: 'El nodo exterior ya está asignado a otra estación' });
+            }
+        }
+        
+        // Iniciar transacción
+        await connection.beginTransaction();
+        
+        try {
+            // Actualizar colmena
+            let updateQuery = 'UPDATE colmena SET descripcion = ?, dueno = ?';
+            let updateParams = [descripcion.trim(), dueno];
+            
+            if (latitud && longitud) {
+                const lat = parseFloat(latitud);
+                const lng = parseFloat(longitud);
+                
+                if (isNaN(lat) || lat < -90 || lat > 90) {
+                    throw new Error('La latitud debe ser un número entre -90 y 90');
+                }
+                
+                if (isNaN(lng) || lng < -180 || lng > 180) {
+                    throw new Error('La longitud debe ser un número entre -180 y 180');
+                }
+                
+                updateQuery += ', latitud = ?, longitud = ?';
+                updateParams.push(lat, lng);
+            }
+            
+            updateQuery += ' WHERE id = ?';
+            updateParams.push(id);
+            
+            await connection.execute(updateQuery, updateParams);
+            
+            // Actualizar nodo interior
+            await connection.execute('DELETE FROM nodo_colmena WHERE colmena_id = ?', [id]);
+            if (nodo_interior) {
+                await connection.execute('INSERT INTO nodo_colmena (colmena_id, nodo_id) VALUES (?, ?)', [id, nodo_interior]);
+            }
+            
+            // Actualizar nodo exterior
+            await connection.execute('DELETE FROM nodo_estacion WHERE estacion_id = ?', [id]);
+            if (nodo_exterior) {
+                await connection.execute('INSERT INTO nodo_estacion (estacion_id, nodo_id) VALUES (?, ?)', [id, nodo_exterior]);
+            }
+            
+            await connection.commit();
+            console.log('✅ Colmena actualizada:', id);
+            
+            res.json({ 
+                message: 'Colmena actualizada correctamente',
+                id: id
+            });
+            
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        }
+        
+    } catch (error) {
+        console.error('💥 Error actualizando colmena:', error);
+        res.status(500).json({ 
+            error: 'Error actualizando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// =============================================
+// AGREGAR ESTOS ENDPOINTS PARA NODOS DISPONIBLES
+// =============================================
+
+// Obtener nodos interiores disponibles (que no estén asignados a otras colmenas)
+app.get('/api/nodos/interiores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🔌 Obteniendo nodos interiores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_colmena nc ON n.id = nc.nodo_id
+            WHERE nc.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos interiores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos interiores disponibles:', error);
+        res.status(500).json({ error: 'Error obteniendo nodos interiores disponibles' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Obtener nodos exteriores disponibles (que no estén asignados a otras estaciones)
+app.get('/api/nodos/exteriores/disponibles', async (req, res) => {
+    let connection;
+    try {
+        console.log('🌡️ Obteniendo nodos exteriores disponibles...');
+        
+        connection = await pool.getConnection();
+        
+        const [rows] = await connection.execute(`
+            SELECT n.id, n.descripcion, n.tipo,
+                nt.descripcion as tipo_descripcion
+            FROM nodo n
+            LEFT JOIN nodo_tipo nt ON n.tipo = nt.tipo
+            LEFT JOIN nodo_estacion ne ON n.id = ne.nodo_id
+            WHERE ne.nodo_id IS NULL
+            ORDER BY n.id ASC
+        `);
+        
+        console.log('✅ Nodos exteriores disponibles:', rows.length);
+        res.json(rows);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo nodos exteriores disponibles:', error);
+        res.status(500).json({ error: 'Error obteniendo nodos exteriores disponibles' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 
     // =============================================
     // VERIFICAR DATOS OFICIALES

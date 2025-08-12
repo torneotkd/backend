@@ -766,6 +766,7 @@ app.get('/api/colmenas', async (req, res) => {
 });
 
     // REEMPLAZAR el endpoint existente app.post('/api/colmenas') con:
+// REEMPLAZAR tu endpoint POST existente con este corregido:
 app.post('/api/colmenas', async (req, res) => {
     let connection;
     try {
@@ -773,10 +774,23 @@ app.post('/api/colmenas', async (req, res) => {
         
         const { descripcion, latitud, longitud, dueno, nodo_interior, nodo_exterior } = req.body;
         
-        // Validar campos requeridos según el nuevo esquema
-        if (!descripcion || !latitud || !longitud || !dueno) {
+        // Validar campos requeridos según el esquema SQL
+        if (!descripcion || !descripcion.trim()) {
             return res.status(400).json({ 
-                error: 'Descripción, latitud, longitud y dueño son obligatorios' 
+                error: 'La descripción es obligatoria' 
+            });
+        }
+        
+        if (!dueno || !dueno.trim()) {
+            return res.status(400).json({ 
+                error: 'El dueño es obligatorio' 
+            });
+        }
+        
+        // ✅ VALIDACIÓN CRÍTICA: latitud y longitud son NOT NULL en tu esquema
+        if (!latitud || !longitud) {
+            return res.status(400).json({ 
+                error: 'Las coordenadas (latitud y longitud) son obligatorias' 
             });
         }
         
@@ -786,6 +800,27 @@ app.post('/api/colmenas', async (req, res) => {
         const [duenoExists] = await connection.execute('SELECT id FROM usuario WHERE id = ? AND activo = 1', [dueno]);
         if (duenoExists.length === 0) {
             return res.status(400).json({ error: 'El usuario dueño no existe o está inactivo' });
+        }
+        
+        // Validar coordenadas - tu esquema usa DECIMAL(10,7)
+        const lat = parseFloat(latitud);
+        const lng = parseFloat(longitud);
+        
+        if (isNaN(lat) || lat < -90 || lat > 90) {
+            return res.status(400).json({ error: 'La latitud debe ser un número válido entre -90 y 90' });
+        }
+        
+        if (isNaN(lng) || lng < -180 || lng > 180) {
+            return res.status(400).json({ error: 'La longitud debe ser un número válido entre -180 y 180' });
+        }
+        
+        // Validar precisión para DECIMAL(10,7) - máximo 3 dígitos antes del decimal, 7 después
+        if (Math.abs(lat) >= 1000) {
+            return res.status(400).json({ error: 'La latitud excede la precisión permitida' });
+        }
+        
+        if (Math.abs(lng) >= 1000) {
+            return res.status(400).json({ error: 'La longitud excede la precisión permitida' });
         }
         
         // Validar nodos si se proporcionan
@@ -815,18 +850,6 @@ app.post('/api/colmenas', async (req, res) => {
             }
         }
         
-        // Validar coordenadas
-        const lat = parseFloat(latitud);
-        const lng = parseFloat(longitud);
-        
-        if (isNaN(lat) || lat < -90 || lat > 90) {
-            return res.status(400).json({ error: 'La latitud debe ser un número entre -90 y 90' });
-        }
-        
-        if (isNaN(lng) || lng < -180 || lng > 180) {
-            return res.status(400).json({ error: 'La longitud debe ser un número entre -180 y 180' });
-        }
-        
         // Generar ID único para la colmena
         const colmenaId = `COL-${Date.now().toString()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
         
@@ -834,11 +857,13 @@ app.post('/api/colmenas', async (req, res) => {
         await connection.beginTransaction();
         
         try {
-            // Insertar nueva colmena
+            // ✅ INSERTAR colmena con valores NOT NULL requeridos
             await connection.execute(`
                 INSERT INTO colmena (id, descripcion, latitud, longitud, dueno) 
                 VALUES (?, ?, ?, ?, ?)
-            `, [colmenaId, descripcion.trim(), lat, lng, dueno]);
+            `, [colmenaId, descripcion.trim(), lat, lng, dueno.trim()]);
+            
+            console.log('✅ Colmena creada:', colmenaId);
             
             // Asignar nodo interior si se proporcionó
             if (nodo_interior) {
@@ -846,25 +871,42 @@ app.post('/api/colmenas', async (req, res) => {
                     INSERT INTO nodo_colmena (colmena_id, nodo_id) 
                     VALUES (?, ?)
                 `, [colmenaId, nodo_interior]);
+                console.log('✅ Nodo interior asignado:', nodo_interior);
             }
             
             // Asignar nodo exterior si se proporcionó
             if (nodo_exterior) {
+                // Crear estación asociada si no existe
+                const estacionId = colmenaId; // Usar mismo ID para simplificar
+                
+                try {
+                    await connection.execute(`
+                        INSERT INTO estacion (id, descripcion, latitud, longitud, dueno) 
+                        VALUES (?, ?, ?, ?, ?)
+                    `, [estacionId, `Estación meteorológica - ${descripcion.trim()}`, lat, lng, dueno.trim()]);
+                    console.log('✅ Estación creada:', estacionId);
+                } catch (estacionError) {
+                    // Si la estación ya existe, continuar
+                    console.log('⚠️ Estación ya existe, continuando...');
+                }
+                
                 await connection.execute(`
                     INSERT INTO nodo_estacion (estacion_id, nodo_id) 
                     VALUES (?, ?)
-                `, [colmenaId, nodo_exterior]);
+                `, [estacionId, nodo_exterior]);
+                console.log('✅ Nodo exterior asignado:', nodo_exterior);
             }
             
             await connection.commit();
-            console.log('✅ Colmena creada exitosamente:', colmenaId);
+            console.log('✅ Transacción completada exitosamente');
             
             res.status(201).json({
+                success: true,
                 id: colmenaId,
                 descripcion: descripcion.trim(),
                 latitud: lat,
                 longitud: lng,
-                dueno: dueno,
+                dueno: dueno.trim(),
                 nodo_interior: nodo_interior || null,
                 nodo_exterior: nodo_exterior || null,
                 message: 'Colmena creada exitosamente'
@@ -872,14 +914,41 @@ app.post('/api/colmenas', async (req, res) => {
             
         } catch (error) {
             await connection.rollback();
+            console.error('💥 Error en transacción:', error);
             throw error;
         }
         
     } catch (error) {
         console.error('💥 Error creando colmena:', error);
+        console.error('💥 Error details:', {
+            message: error.message,
+            code: error.code,
+            errno: error.errno,
+            sql: error.sql
+        });
+        
+        // Manejo específico de errores de MySQL
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(400).json({ 
+                error: 'Ya existe una colmena con ese ID'
+            });
+        }
+        
+        if (error.code === 'ER_BAD_NULL_ERROR') {
+            return res.status(400).json({ 
+                error: 'Faltan campos obligatorios. Verifique que descripción, latitud, longitud y dueño estén completos.'
+            });
+        }
+        
+        if (error.code === 'ER_WARN_DATA_OUT_OF_RANGE') {
+            return res.status(400).json({ 
+                error: 'Los valores de latitud o longitud están fuera del rango permitido'
+            });
+        }
+        
         res.status(500).json({ 
             error: 'Error creando colmena',
-            details: error.message 
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Error interno del servidor'
         });
     } finally {
         if (connection) connection.release();

@@ -1091,6 +1091,177 @@ app.get('/api/nodos/exteriores/disponibles', async (req, res) => {
         if (connection) connection.release();
     }
 });
+// =============================================
+// ENDPOINT DELETE PARA ELIMINAR COLMENAS (FALTANTE)
+// =============================================
+
+app.delete('/api/colmenas/:id', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        
+        console.log(`🗑️ Eliminando colmena ${id}`);
+        
+        connection = await pool.getConnection();
+        
+        // Verificar que la colmena existe
+        const [colmenaExists] = await connection.execute('SELECT id, descripcion FROM colmena WHERE id = ?', [id]);
+        if (colmenaExists.length === 0) {
+            return res.status(404).json({ error: 'Colmena no encontrada' });
+        }
+        
+        const colmena = colmenaExists[0];
+        
+        // Iniciar transacción
+        await connection.beginTransaction();
+        
+        try {
+            // Eliminar relaciones con nodos (nodo_colmena)
+            await connection.execute('DELETE FROM nodo_colmena WHERE colmena_id = ?', [id]);
+            console.log('✅ Relaciones nodo_colmena eliminadas');
+            
+            // Eliminar relaciones con estaciones (nodo_estacion) si existen
+            await connection.execute('DELETE FROM nodo_estacion WHERE estacion_id = ?', [id]);
+            console.log('✅ Relaciones nodo_estacion eliminadas');
+            
+            // Eliminar mensajes relacionados con nodos de esta colmena (si existen)
+            try {
+                await connection.execute(`
+                    DELETE nm FROM nodo_mensaje nm 
+                    INNER JOIN nodo_colmena nc ON nm.nodo_id = nc.nodo_id 
+                    WHERE nc.colmena_id = ?
+                `, [id]);
+                console.log('✅ Mensajes de nodos eliminados');
+            } catch (e) {
+                console.log('⚠️ No se pudieron eliminar mensajes de nodos (normal si no hay datos)');
+            }
+            
+            // Eliminar alertas relacionadas (si existen)
+            try {
+                await connection.execute(`
+                    DELETE na FROM nodo_alerta na 
+                    INNER JOIN nodo_colmena nc ON na.nodo_id = nc.nodo_id 
+                    WHERE nc.colmena_id = ?
+                `, [id]);
+                console.log('✅ Alertas de nodos eliminadas');
+            } catch (e) {
+                console.log('⚠️ No se pudieron eliminar alertas de nodos (normal si no hay datos)');
+            }
+            
+            // Eliminar estación asociada si existe
+            try {
+                await connection.execute('DELETE FROM estacion WHERE id = ?', [id]);
+                console.log('✅ Estación asociada eliminada');
+            } catch (e) {
+                console.log('⚠️ No se pudo eliminar estación asociada (normal si no existe)');
+            }
+            
+            // Finalmente eliminar la colmena
+            await connection.execute('DELETE FROM colmena WHERE id = ?', [id]);
+            console.log('✅ Colmena eliminada');
+            
+            await connection.commit();
+            
+            res.json({ 
+                message: `Colmena "${colmena.descripcion}" eliminada correctamente`,
+                id: id
+            });
+            
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        }
+        
+    } catch (error) {
+        console.error('💥 Error eliminando colmena:', error);
+        
+        // Error específico para foreign key constraint
+        if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+            return res.status(400).json({ 
+                error: 'No se puede eliminar la colmena porque tiene registros asociados'
+            });
+        }
+        
+        res.status(500).json({ 
+            error: 'Error eliminando colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+// =============================================
+// ENDPOINT GET POR ID PARA COLMENAS (PUEDE FALTAR)
+// =============================================
+
+app.get('/api/colmenas/:id', async (req, res) => {
+    let connection;
+    try {
+        const { id } = req.params;
+        
+        console.log(`🔍 Obteniendo colmena ${id}`);
+        
+        connection = await pool.getConnection();
+        
+        const [colmenas] = await connection.execute(`
+            SELECT c.id, c.descripcion, c.latitud, c.longitud, c.dueno,
+                u.nombre as dueno_nombre, u.apellido as dueno_apellido, u.comuna as dueno_comuna,
+                nc.nodo_id as nodo_interior_id,
+                n_interior.descripcion as nodo_interior_descripcion,
+                ne.nodo_id as nodo_exterior_id,
+                n_exterior.descripcion as nodo_exterior_descripcion
+            FROM colmena c
+            LEFT JOIN usuario u ON c.dueno = u.id
+            LEFT JOIN nodo_colmena nc ON c.id = nc.colmena_id
+            LEFT JOIN nodo n_interior ON nc.nodo_id = n_interior.id
+            LEFT JOIN nodo_estacion ne ON c.id = ne.estacion_id
+            LEFT JOIN nodo n_exterior ON ne.nodo_id = n_exterior.id
+            WHERE c.id = ?
+        `, [id]);
+        
+        if (colmenas.length === 0) {
+            return res.status(404).json({ error: 'Colmena no encontrada' });
+        }
+        
+        const colmena = colmenas[0];
+        
+        // Formatear para compatibilidad con frontend
+        const colmenaFormateada = {
+            id: colmena.id,
+            nombre: `Colmena ${colmena.id}`,
+            tipo: 'Langstroth',
+            descripcion: colmena.descripcion,
+            dueno: colmena.dueno,
+            dueno_nombre: colmena.dueno_nombre,
+            dueno_apellido: colmena.dueno_apellido,
+            apiario_id: null,
+            apiario_nombre: colmena.dueno_comuna || 'Sin ubicación',
+            fecha_instalacion: new Date().toISOString(),
+            activa: 1,
+            latitud: colmena.latitud,
+            longitud: colmena.longitud,
+            ubicacion: colmena.latitud && colmena.longitud ? `${colmena.latitud}, ${colmena.longitud}` : null,
+            comuna: colmena.dueno_comuna,
+            // Campos de nodos
+            nodo_interior_id: colmena.nodo_interior_id,
+            nodo_interior_descripcion: colmena.nodo_interior_descripcion,
+            nodo_exterior_id: colmena.nodo_exterior_id,
+            nodo_exterior_descripcion: colmena.nodo_exterior_descripcion
+        };
+        
+        console.log('✅ Colmena obtenida:', colmenaFormateada.id);
+        res.json(colmenaFormateada);
+        
+    } catch (error) {
+        console.error('💥 Error obteniendo colmena por ID:', error);
+        res.status(500).json({ 
+            error: 'Error obteniendo colmena',
+            details: error.message 
+        });
+    } finally {
+        if (connection) connection.release();
+    }
+});
 
 // =============================================
 // ENDPOINTS PARA NODOS DISPONIBLES (FALTANTES)
